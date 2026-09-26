@@ -2,7 +2,7 @@
 import datetime as dt
 import enum
 
-from sqlalchemy import BigInteger, DateTime, Enum, Float, ForeignKey, Integer, String, Text, Boolean
+from sqlalchemy import BigInteger, DateTime, Enum, Float, ForeignKey, Integer, String, Text, Boolean, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -68,6 +68,13 @@ class Video(Base, TimestampMixin):
 
 class Post(Base, TimestampMixin):
     __tablename__ = "posts"
+    # One post row per schedule slot, ever: the grace window lets several
+    # beat ticks see the same slot, so (account_id, slot_for) is unique.
+    # SQLite/PG treat NULLs as distinct, so manual/API posts (slot_for NULL)
+    # never conflict with each other or with scheduler posts.
+    __table_args__ = (
+        UniqueConstraint("account_id", "slot_for", name="uq_posts_account_slot"),
+    )
 
     video_id: Mapped[int] = mapped_column(ForeignKey("videos.id"), nullable=False)
     account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
@@ -78,6 +85,10 @@ class Post(Base, TimestampMixin):
     status: Mapped[PostStatus] = mapped_column(Enum(PostStatus), default=PostStatus.scheduled)
     scheduled_for: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     posted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Schedule slot (aware UTC) this post was created for — the rule's
+    # wall-clock minute in SCHEDULE_TZ. NULL for manual/API posts.
+    # Powers the grace-window dedup: one slot → at most one post row.
+    slot_for: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     views_24h: Mapped[int | None] = mapped_column(Integer, nullable=True)
     views_7d: Mapped[int | None] = mapped_column(Integer, nullable=True)

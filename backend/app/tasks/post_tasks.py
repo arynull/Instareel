@@ -15,8 +15,9 @@ log = logging.getLogger("igfunnel.tasks.post")
 
 @celery.task(name="tasks.post_tasks.check_and_post", bind=True, max_retries=0)
 def check_and_post(self):
-    """Beat entry: create scheduled posts from due rules, then fire due posts."""
+    """Beat entry: create scheduled posts from due rule slots, then fire due posts."""
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
 
     from app.database import SyncSessionLocal
     from app.models import Post, PostStatus
@@ -25,10 +26,18 @@ def check_and_post(self):
 
     try:
         with SyncSessionLocal() as s:
-            rules = sched.due_rules(s)
+            # (rule, slot) pairs — a slot stays fireable for
+            # SCHEDULE_GRACE_MINUTES after its minute, so a brief
+            # worker/beat outage at the exact minute doesn't lose it.
+            slots = sched.due_rule_slots(s)
             created = 0
             used_video_ids: set[int] = set()
-            for rule in rules:
+            for rule, slot_utc in slots:
+                if sched.slot_already_fired(s, rule, slot_utc):
+                    # This slot already has its post row (any status) —
+                    # without this, every tick in the grace window would
+                    # queue another post for the same slot.
+                    continue
                 if sched.already_scheduled(s, rule):
                     continue
                 account = sched.eligible_account(s, rule.account_id)
@@ -76,11 +85,24 @@ def check_and_post(self):
                         hashtags=tags,
                         status=PostStatus.scheduled,
                         scheduled_for=when,
+                        slot_for=slot_utc,
                         is_trial=bool(video.is_trial),
                     )
                 )
-                s.flush()  # make the reservation visible to later rules in this tick
-                s.commit()  # per-rule commit: one bad rule can't void the whole tick
+                try:
+                    s.flush()  # make the reservation visible to later rules in this tick
+                    s.commit()  # per-rule commit: one bad rule can't void the whole tick
+                except IntegrityError:
+                    # Lost a race with a concurrent tick on the same slot —
+                    # uq_posts_account_slot did its job. The slot is claimed;
+                    # skip it instead of double-posting.
+                    s.rollback()
+                    log_event_sync(
+                        "INFO", "schedule",
+                        f"Rule '{rule.name}' slot {slot_utc:%H:%M} already taken "
+                        "by a concurrent tick — skipping",
+                    )
+                    continue
                 if rule.pinned_video_id:
                     # One-shot fired: retire so tomorrow's tick doesn't re-post.
                     rule.is_active = False
@@ -96,10 +118,10 @@ def check_and_post(self):
                 )
             ).scalars().all()
             due_ids = [p.id for p in due]
-            rule_count = len(rules)
+            slots_matched = len(slots)
         for pid in due_ids:
             execute_post.delay(pid)
-        return {"rules_matched": rule_count, "created": created, "fired": len(due_ids)}
+        return {"slots_matched": slots_matched, "created": created, "fired": len(due_ids)}
     except Exception:  # noqa: BLE001
         log.exception("check_and_post failed")
         return {"error": "tick failed"}

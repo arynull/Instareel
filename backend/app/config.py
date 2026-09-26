@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     # (e.g. Asia/Tehran) so the dashboard times match reality. Beat crontabs
     # (daily reset, cleanup, …) follow it too.
     SCHEDULE_TZ: str = "UTC"
+    # Grace window (minutes) for schedule-rule firing: a rule's slot stays
+    # fireable this long AFTER its minute passes. If the worker/beat is down
+    # at the exact scheduled minute, the slot is still posted (late) instead
+    # of silently lost. 0 = legacy exact-minute behavior.
+    SCHEDULE_GRACE_MINUTES: int = 5
 
     MEDIA_ROOT: str = "./media"
     MAX_UPLOAD_MB: int = 500
@@ -116,6 +121,19 @@ class Settings(BaseSettings):
                 "Invalid SCHEDULE_TZ=%r — falling back to UTC", self.SCHEDULE_TZ
             )
             self.SCHEDULE_TZ = "UTC"
+        return self
+
+    @model_validator(mode="after")
+    def _validate_schedule_grace(self):
+        """A negative grace window is meaningless — clamp to 0 (exact-minute)."""
+        if self.SCHEDULE_GRACE_MINUTES < 0:
+            import logging
+
+            logging.getLogger("igfunnel").warning(
+                "SCHEDULE_GRACE_MINUTES=%r is negative — clamped to 0",
+                self.SCHEDULE_GRACE_MINUTES,
+            )
+            self.SCHEDULE_GRACE_MINUTES = 0
         return self
 
 

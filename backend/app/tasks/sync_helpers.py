@@ -489,6 +489,86 @@ def due_rules(session, at: "dt.datetime | None" = None):
     return list(session.execute(q).scalars().all())
 
 
+def _schedule_grace_minutes() -> int:
+    """Grace window (minutes) a rule slot stays fireable after its minute."""
+    from app.config import settings
+
+    try:
+        return max(0, int(settings.SCHEDULE_GRACE_MINUTES))
+    except (TypeError, ValueError):
+        return 0
+
+
+def due_rule_slots(session, at: "dt.datetime | None" = None):
+    """(rule, slot) pairs whose scheduled minute fell inside the grace window.
+
+    A slot is the rule's wall-clock minute in SCHEDULE_TZ. It stays fireable
+    for SCHEDULE_GRACE_MINUTES after the minute passes, so a brief
+    worker/beat outage at the exact minute doesn't silently lose the slot —
+    the next tick still posts it (a few minutes late).
+
+    Returns pairs sorted oldest-slot-first. The slot is normalized to aware
+    UTC — the same convention as Post.scheduled_for — so it can be stored
+    in Post.slot_for and compared directly. ``grace=0`` degrades to the
+    exact-minute behavior of due_rules().
+    """
+    from zoneinfo import ZoneInfo
+
+    from app.config import settings
+    from app.models import ScheduleRule
+
+    at = at or _schedule_now()
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=ZoneInfo(settings.SCHEDULE_TZ))
+    at = at.replace(second=0, microsecond=0)
+    grace = _schedule_grace_minutes()
+    rules = list(
+        session.execute(
+            select(ScheduleRule).where(ScheduleRule.is_active.is_(True))
+        )
+        .scalars()
+        .all()
+    )
+    seen: set[tuple[int, dt.datetime]] = set()
+    pairs: list[tuple["ScheduleRule", dt.datetime]] = []
+    for back in range(grace, -1, -1):
+        slot = at - dt.timedelta(minutes=back)
+        for rule in rules:
+            if not (
+                (rule.day_of_week == -1 or rule.day_of_week == slot.weekday())
+                and rule.hour == slot.hour
+                and rule.minute == slot.minute
+            ):
+                continue
+            slot_utc = slot.astimezone(dt.timezone.utc)
+            key = (rule.id, slot_utc)
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append((rule, slot_utc))
+    pairs.sort(key=lambda p: p[1])
+    return pairs
+
+
+def slot_already_fired(session, rule: "ScheduleRule", slot_utc: dt.datetime) -> bool:
+    """True once ANY post row exists for this account+slot.
+
+    One slot → at most one post row, ever: in-flight/done statuses AND
+    terminal ones (failed/deleted) all count — a failed slot is owned by the
+    retry/reprocess machinery, not re-fired (avoids duplicate content on
+    false-negative failures and failure loops on bad videos). Without this,
+    every beat tick inside the grace window would queue another post for the
+    same slot.
+    """
+    from app.models import Post
+
+    q = select(func.count(Post.id)).where(
+        Post.slot_for == slot_utc,
+        (Post.account_id == rule.account_id) if rule.account_id else True,
+    )
+    return (session.execute(q).scalar() or 0) > 0
+
+
 def eligible_account(session, account_id: "int | None" = None):
     from app.models import Account, AccountStatus
 
