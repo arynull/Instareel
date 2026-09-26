@@ -8,6 +8,7 @@ import {
 import { useTheme } from "next-themes";
 import { cn } from "@/lib/utils";
 import { useAuth, useUi } from "@/stores/stores";
+import { NotificationBell } from "@/components/notifications";
 
 const NAV = [
   { href: "/dashboard", label: "Dashboard", icon: Home },
@@ -77,6 +78,7 @@ export function Header() {
     <header className="flex h-16 items-center gap-3 border-b border-zinc-200 bg-white/80 px-4 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/80 md:hidden">
       <span className="font-extrabold">IG Funnel</span>
       <div className="ml-auto flex min-w-0 items-center gap-2">
+        <NotificationBell />
         <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")} className="btn-ghost shrink-0 !px-2" aria-label="Toggle theme">
           {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
         </button>
@@ -100,6 +102,7 @@ export function TopBar() {
       </button>
       <span className="text-xs text-zinc-400">{sidebarOpen ? "" : "IG Funnel"}</span>
       <div className="ml-auto flex items-center gap-3">
+        <NotificationBell />
         <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")} className="btn-ghost !px-2" aria-label="Toggle theme">
           {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
         </button>

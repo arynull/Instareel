@@ -123,6 +123,25 @@ export function useSystemHealth() {
   // Health page fresh without hammering the (blocking) worker ping.
   return useQuery({ queryKey: ["system-health"], queryFn: () => get("/system/health"), refetchInterval: 15000 });
 }
+export function useNotifications() {
+  // Bell feed: recent notifications + unread count + upcoming slots.
+  // 30s poll — event-driven freshness comes from the watchdog task.
+  return useQuery({ queryKey: ["notifications"], queryFn: () => get("/notifications"), refetchInterval: 30000 });
+}
+export function useMarkNotificationRead() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.post(`/notifications/${id}/read`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+  });
+}
+export function useMarkAllNotificationsRead() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post("/notifications/read-all"),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+  });
+}
 export function useBestSlots(accountId: string | number | "") {
   return useQuery({
     queryKey: ["best-slots", accountId],

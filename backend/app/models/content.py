@@ -143,6 +143,39 @@ class SystemLog(Base):
     )
 
 
+class NotificationSeverity(str, enum.Enum):
+    INFO = "info"
+    SUCCESS = "success"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
+class Notification(Base, TimestampMixin):
+    """User-facing notifications for the dashboard bell.
+
+    Unlike SystemLog (append-only diagnostics), notifications carry
+    read/unread state, a severity, an optional deep link, and a dedup_key
+    so recurring conditions (e.g. "beat is down") notify once instead of
+    spamming every tick.
+    """
+
+    __tablename__ = "notifications"
+
+    ntype: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # Stored as the lowercase value ("critical"), not the enum name — the
+    # API/frontend contract uses values, so the DB must match.
+    severity: Mapped[NotificationSeverity] = mapped_column(
+        SQLEnum(NotificationSeverity, values_callable=lambda e: [m.value for m in e]),
+        default=NotificationSeverity.INFO,
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    link: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    dedup_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    read_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Setting(Base):
     __tablename__ = "settings"
 

@@ -11,7 +11,6 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-import app.api.system as system_module
 import app.tasks.celery_app as celery_app_module
 from app.api.deps import get_current_admin, get_db
 from app.config import settings
@@ -33,6 +32,22 @@ class _FakeAsyncRedis:
         return self._store.get(key)
 
     async def close(self):
+        pass
+
+
+class _FakeSyncRedis:
+    """Minimal sync Redis stand-in for app.services.health_checks."""
+
+    def __init__(self, store):
+        self._store = dict(store)
+
+    def ping(self):
+        return True
+
+    def get(self, key):
+        return self._store.get(key)
+
+    def close(self):
         pass
 
 
@@ -64,6 +79,13 @@ def _fake_redis_factory(store):
     return _from_url
 
 
+def _fake_sync_redis_factory(store):
+    def _from_url(*args, **kwargs):
+        return _FakeSyncRedis(store)
+
+    return _from_url
+
+
 def _fresh_store():
     return {"health:beat_heartbeat": dt.datetime.now(dt.timezone.utc).isoformat()}
 
@@ -87,8 +109,11 @@ def client(tmp_path, monkeypatch):
     # ffmpeg is not installed in CI — pretend it is so the happy path is green.
     monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
 
+    # The health checks use the SYNC redis client (shared with the watchdog).
+    import redis as redis_module
+
     monkeypatch.setattr(
-        system_module.aioredis, "from_url", _fake_redis_factory(_fresh_store())
+        redis_module, "from_url", _fake_sync_redis_factory(_fresh_store())
     )
     monkeypatch.setattr(
         celery_app_module, "celery", _FakeCelery({"worker@test": {"ok": "pong"}})
@@ -160,7 +185,8 @@ def test_health_beat_stale_marks_down(client, tmp_path, monkeypatch):
             dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10)
         ).isoformat()
     }
-    monkeypatch.setattr(system_module.aioredis, "from_url", _fake_redis_factory(stale))
+    import redis as redis_module
+    monkeypatch.setattr(redis_module, "from_url", _fake_sync_redis_factory(stale))
     body = c.get("/api/v1/system/health").json()
     comps = {c_["name"]: c_ for c_ in body["components"]}
     assert comps["celery_beat"]["status"] == "down"
@@ -173,7 +199,8 @@ def test_health_beat_stale_marks_down(client, tmp_path, monkeypatch):
 def test_health_beat_missing_marks_down(client, tmp_path, monkeypatch):
     c, maker = client
     _seed(tmp_path, maker)
-    monkeypatch.setattr(system_module.aioredis, "from_url", _fake_redis_factory({}))
+    import redis as redis_module
+    monkeypatch.setattr(redis_module, "from_url", _fake_sync_redis_factory({}))
     body = c.get("/api/v1/system/health").json()
     assert {c_["name"]: c_["status"] for c_ in body["components"]}["celery_beat"] == "down"
 

@@ -81,4 +81,14 @@ def process_video_task(self, video_id: int, effect_filter: str = "", color_grade
         mark(VideoStatus.failed, str(exc))
         publish_sync("video_processing_complete", {"video_id": video_id, "status": "failed"})
         log_event_sync("ERROR", "video", f"Video {video_id} failed: {exc}")
+        from app.tasks.sync_helpers import notify_sync
+
+        notify_sync(
+            "video_failed",
+            "warning",
+            f"Video {video_id} processing failed",
+            str(exc)[:500],
+            link="/dashboard/videos",
+            dedup_key=f"video_failed:{video_id}",
+        )
         return {"video_id": video_id, "status": "failed", "error": str(exc)}

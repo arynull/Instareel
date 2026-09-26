@@ -24,6 +24,8 @@ celery.conf.beat_schedule = {
     "check-scheduled-posts": {"task": "tasks.post_tasks.check_and_post", "schedule": crontab(minute="*")},
     # Liveness proof for the Health page: a live-but-stuck beat still counts as down.
     "beat-heartbeat": {"task": "tasks.health_tasks.beat_heartbeat", "schedule": crontab(minute="*")},
+    # Turns critical-component state changes into dashboard notifications.
+    "system-watchdog": {"task": "tasks.health_tasks.system_watchdog", "schedule": crontab(minute="*/2")},
     "fetch-analytics": {"task": "tasks.analytics_tasks.fetch_all_analytics", "schedule": crontab(hour="*/4")},
     "proxy-health-check": {"task": "tasks.proxy_tasks.check_all_proxies", "schedule": crontab(minute="*/30")},
     "proxy-pool-refresh": {"task": "tasks.proxy_tasks.refresh_proxy_pool", "schedule": crontab(hour="*/3", minute=17)},

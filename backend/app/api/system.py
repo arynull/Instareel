@@ -73,11 +73,16 @@ async def system_health(
     import os
     import shutil
     import time
-    from urllib.parse import urlparse
 
     from sqlalchemy import text as sa_text
 
     from app.models import Account, AccountStatus, Proxy
+    from app.services.health_checks import (
+        check_beat_sync,
+        check_database_sync,
+        check_redis_sync,
+        check_worker_sync,
+    )
     from app.utils.instagram_helpers import session_path_for
 
     results: list[dict] = []
@@ -99,62 +104,6 @@ async def system_health(
                 "checked_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             }
         )
-
-    async def check_database():
-        await db.execute(sa_text("SELECT 1"))
-        return "ok", "Query round-trip ok"
-
-    async def check_redis():
-        client = None
-        try:
-            client = aioredis.from_url(
-                settings.REDIS_URL, decode_responses=True, socket_timeout=5
-            )
-            pong = await asyncio.wait_for(client.ping(), timeout=6)
-            host = urlparse(settings.REDIS_URL).hostname or "?"
-            port = urlparse(settings.REDIS_URL).port or 6379
-            if pong:
-                return "ok", f"PONG from {host}:{port}"
-            return "down", f"No PONG from {host}:{port}"
-        finally:
-            if client is not None:
-                await client.close()
-
-    def ping_workers_sync():
-        from app.tasks.celery_app import celery
-
-        pong = celery.control.inspect(timeout=5).ping() or {}
-        alive = sorted(
-            node for node, reply in pong.items()
-            if isinstance(reply, dict) and reply.get("ok") == "pong"
-        )
-        if alive:
-            return "ok", f"{len(alive)} worker(s) alive: {', '.join(alive)}"
-        return "down", "No worker replied — worker down or broker URL wrong"
-
-    async def check_worker():
-        return await asyncio.to_thread(ping_workers_sync)
-
-    async def check_beat():
-        # Beat refreshes health:beat_heartbeat every minute (see health_tasks).
-        client = None
-        try:
-            client = aioredis.from_url(
-                settings.REDIS_URL, decode_responses=True, socket_timeout=5
-            )
-            raw = await asyncio.wait_for(client.get("health:beat_heartbeat"), timeout=6)
-            if not raw:
-                return "down", "No heartbeat yet — beat hasn't ticked (or just restarted)"
-            ts = dt.datetime.fromisoformat(raw)
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=dt.timezone.utc)
-            age = (dt.datetime.now(dt.timezone.utc) - ts).total_seconds()
-            if age < 150:
-                return "ok", f"Last tick {int(age)}s ago"
-            return "down", f"Last tick {int(age)}s ago — beat is not scheduling"
-        finally:
-            if client is not None:
-                await client.close()
 
     async def check_instagram():
         rows = (
@@ -210,10 +159,10 @@ async def system_health(
             return "warn", f"Disk {pct:.0f}% full ({free_gb:.1f} GB free)"
         return "ok", f"Disk {pct:.0f}% used ({free_gb:.1f} GB free)"
 
-    await run("database", "Database", True, check_database())
-    await run("redis", "Redis", True, check_redis())
-    await run("celery_worker", "Celery worker", True, check_worker())
-    await run("celery_beat", "Celery beat", True, check_beat())
+    await run("database", "Database", True, asyncio.to_thread(check_database_sync))
+    await run("redis", "Redis", True, asyncio.to_thread(check_redis_sync))
+    await run("celery_worker", "Celery worker", True, asyncio.to_thread(check_worker_sync))
+    await run("celery_beat", "Celery beat", True, asyncio.to_thread(check_beat_sync))
     await run("instagram", "Instagram sessions", False, check_instagram())
     await run("proxies", "Proxies", False, check_proxies())
     await run("ffmpeg", "FFmpeg", False, check_ffmpeg())

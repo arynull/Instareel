@@ -22,7 +22,7 @@ def check_and_post(self):
     from app.database import SyncSessionLocal
     from app.models import Post, PostStatus
     from app.tasks import sync_helpers as sched
-    from app.tasks.sync_helpers import log_event_sync
+    from app.tasks.sync_helpers import log_event_sync, notify_sync
 
     try:
         with SyncSessionLocal() as s:
@@ -46,6 +46,16 @@ def check_and_post(self):
                 if not sched.account_reachable(s, account):
                     # Its proxy is down and no spare is healthy — leave the
                     # slot for the next tick instead of queueing a doomed post.
+                    hour = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d-%H")
+                    notify_sync(
+                        "proxy_pool_down",
+                        "critical",
+                        f"No working proxy for @{account.username}",
+                        f"Rule '{rule.name}' slot skipped: the account's proxy is down "
+                        "and no spare is healthy. The slot stays armed for the next tick.",
+                        link="/dashboard/proxies",
+                        dedup_key=f"proxy_pool:{account.id}:{hour}",
+                    )
                     continue
                 video, disposition = sched.resolve_rule_video(s, rule, used_video_ids)
                 if disposition in ("retire_gone", "retire_posted"):
@@ -110,6 +120,22 @@ def check_and_post(self):
                     log_event_sync("INFO", "schedule", f"Rule '{rule.name}' fired its pinned video and retired")
                 used_video_ids.add(video.id)
                 created += 1
+                late_minutes = (dt.datetime.now(dt.timezone.utc) - slot_utc).total_seconds() / 60
+                if late_minutes >= 1:
+                    # The grace window recovered this slot after an outage at
+                    # the exact minute — worth one info-level heads-up.
+                    from zoneinfo import ZoneInfo
+
+                    local_slot = slot_utc.astimezone(ZoneInfo(sched.settings.SCHEDULE_TZ))
+                    notify_sync(
+                        "slot_fired_late",
+                        "info",
+                        f"Rule '{rule.name}' fired {int(late_minutes)} min late",
+                        f"The {local_slot:%H:%M} slot for rule '{rule.name}' was claimed "
+                        f"{int(late_minutes)} min after its minute (grace window recovery) — "
+                        "the post is queued.",
+                        link="/dashboard/posts",
+                    )
 
             now = dt.datetime.now(dt.timezone.utc)
             due = (
@@ -137,7 +163,7 @@ def execute_post(self, post_id: int):
     from app.models import Account, AccountStatus, Post, PostStatus, Proxy, Video, VideoStatus
     from app.services.instagram_service import InstagramService
     from app.tasks import sync_helpers as sched
-    from app.tasks.sync_helpers import log_event_sync, publish_sync
+    from app.tasks.sync_helpers import log_event_sync, notify_sync, publish_sync
     from app.utils.instagram_helpers import session_path_for
 
     def set_status(status: PostStatus, **fields):
@@ -305,6 +331,19 @@ def execute_post(self, post_id: int):
                 )
                 touch_account(False, error)
                 log_event_sync("ERROR", "post", f"Post {post_id} to @{username} failed: {error}")
+                if kind == "login_required":
+                    # Retries can't fix a dead session — tell the admin once
+                    # per day so they refresh it instead of burning attempts.
+                    day = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+                    notify_sync(
+                        "account_session_invalid",
+                        "warning",
+                        f"@{username} session invalid",
+                        f"Instagram rejected the session for @{username} (login required). "
+                        "Refresh the session on the Accounts page to resume posting.",
+                        link="/dashboard/accounts",
+                        dedup_key=f"session:{username}:{day}",
+                    )
                 raise self.retry(exc=RuntimeError(error), countdown=countdown)
             touch_account(False, error)
             if proxy_id is not None and (
@@ -327,6 +366,13 @@ def execute_post(self, post_id: int):
             )
             set_status(PostStatus.failed, fail_reason=fail_note[:2000], retry_count=retries + 1)
             log_event_sync("ERROR", "post", f"Post {post_id} to @{username} failed: {fail_note}")
+            notify_sync(
+                "post_failed",
+                "critical",
+                f"Post to @{username} failed",
+                fail_note[:500],
+                link="/dashboard/posts",
+            )
             return {"post_id": post_id, "status": "failed", "error": error}
 
         set_status(
@@ -349,6 +395,13 @@ def execute_post(self, post_id: int):
                     sched.record_proxy_check(s, _p, True)
             s.commit()
         log_event_sync("INFO", "post", f"Posted to @{username}", {"post_id": post_id, "url": permalink})
+        notify_sync(
+            "post_posted",
+            "success",
+            f"Posted to @{username}",
+            f"Video posted to @{username}." + (f" {permalink}" if permalink else ""),
+            link="/dashboard/posts",
+        )
         return {"post_id": post_id, "status": "posted", "url": permalink}
     except Retry:
         raise

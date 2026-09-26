@@ -3,6 +3,7 @@ from fastapi import APIRouter
 
 from app.api import auth
 from app.api.accounts import router as accounts_router
+from app.api.notifications import notifications_router
 from app.api.resources import audio_router, bio_router, effect_router, proxy_router
 from app.api.scheduling import caption_router, hashtag_router, schedule_router
 from app.api.sources import source_router
@@ -26,5 +27,6 @@ router.include_router(analytics_router, prefix="/analytics", tags=["analytics"])
 router.include_router(logs_router, prefix="/logs", tags=["logs"])
 router.include_router(settings_router, prefix="/settings", tags=["settings"])
 router.include_router(system_router, prefix="/system", tags=["system"])
+router.include_router(notifications_router, prefix="/notifications", tags=["notifications"])
 # WebSocket is mounted on the app root (not under /api/v1) by main.py.
 ws_mount = ws_router

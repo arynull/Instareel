@@ -68,6 +68,69 @@ def log_event_sync(level: str, category: str, message: str, details: dict | None
         log.exception("Failed to persist system log")
 
 
+# ---- User-facing notifications (dashboard bell) ----
+
+#: How long read notifications are kept before the watchdog prunes them.
+NOTIFICATION_RETENTION_DAYS = 30
+
+
+def notify_sync(
+    ntype: str,
+    severity: str,
+    title: str,
+    message: str,
+    link: str | None = None,
+    dedup_key: str | None = None,
+) -> int | None:
+    """Create a dashboard notification (commit included).
+
+    With dedup_key, an identical UNREAD notification suppresses the new one —
+    recurring conditions notify once instead of spamming every tick. Once the
+    user reads it (or the watchdog auto-resolves it), the condition may
+    notify again. Never raises: a notification must not break the task that
+    triggered it.
+    """
+    from app.database import SyncSessionLocal
+    from app.models import Notification, NotificationSeverity
+
+    try:
+        sev = NotificationSeverity(severity)
+    except ValueError:
+        sev = NotificationSeverity.INFO
+    try:
+        with SyncSessionLocal() as session:
+            if dedup_key:
+                existing = (
+                    session.execute(
+                        select(Notification)
+                        .where(
+                            Notification.dedup_key == dedup_key,
+                            Notification.read_at.is_(None),
+                        )
+                        .limit(1)
+                    )
+                    .scalars()
+                    .first()
+                )
+                if existing is not None:
+                    return existing.id
+            n = Notification(
+                ntype=ntype,
+                severity=sev,
+                title=title,
+                message=message,
+                link=link,
+                dedup_key=dedup_key,
+            )
+            session.add(n)
+            session.commit()
+            session.refresh(n)
+            return n.id
+    except Exception:
+        log.exception("Failed to persist notification %s", ntype)
+        return None
+
+
 # ---- Sync scheduler helpers (mirrors the async service used by the web API) ----
 
 import datetime as dt
