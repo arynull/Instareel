@@ -129,7 +129,10 @@ services:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/ || exit 1"]
+      # NOTE: 127.0.0.1, not localhost — inside the container `localhost`
+      # resolves to ::1 only, while the Next.js server listens on IPv4
+      # (HOSTNAME=0.0.0.0). Checking `localhost` always fails.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
