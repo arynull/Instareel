@@ -22,6 +22,11 @@ RUN npm run build
 FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+# The standalone server binds to $HOSTNAME when set — Docker defaults it to
+# the container ID (resolves to the container IP only), so loopback checks
+# (healthcheck, exec) get connection refused while nginx still works.
+# Bind all interfaces instead.
+ENV HOSTNAME="0.0.0.0"
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
