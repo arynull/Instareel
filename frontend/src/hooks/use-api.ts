@@ -118,6 +118,11 @@ export function useServerStats() {
   // Skipped in background tabs by the browser's interval throttling.
   return useQuery({ queryKey: ["server-stats"], queryFn: () => get("/system/stats"), refetchInterval: 5000 });
 }
+export function useSystemHealth() {
+  // Connectivity health of every pipeline dependency; 15s poll keeps the
+  // Health page fresh without hammering the (blocking) worker ping.
+  return useQuery({ queryKey: ["system-health"], queryFn: () => get("/system/health"), refetchInterval: 15000 });
+}
 export function useBestSlots(accountId: string | number | "") {
   return useQuery({
     queryKey: ["best-slots", accountId],

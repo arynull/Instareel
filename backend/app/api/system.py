@@ -57,6 +57,182 @@ async def system_timezone(_: str = Depends(get_current_admin)):
     }
 
 
+@system_router.get("/health")
+async def system_health(
+    _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)
+):
+    """Connectivity health of every module the pipeline depends on.
+
+    Powers the dashboard Health page: database, Redis, Celery worker,
+    Celery beat (via a per-minute heartbeat key — a live beat process that
+    stopped ticking still counts as down), Instagram session files,
+    proxies, FFmpeg and disk space. Each check is isolated: one failing
+    dependency never hides the state of the others.
+    """
+    import asyncio
+    import os
+    import shutil
+    import time
+    from urllib.parse import urlparse
+
+    from sqlalchemy import text as sa_text
+
+    from app.models import Account, AccountStatus, Proxy
+    from app.utils.instagram_helpers import session_path_for
+
+    results: list[dict] = []
+
+    async def run(name: str, label: str, critical: bool, coro):
+        started = time.perf_counter()
+        try:
+            status, message = await coro
+        except Exception as exc:  # noqa: BLE001 — a check must never 500 the page
+            status, message = "down", f"{type(exc).__name__}: {exc}"
+        results.append(
+            {
+                "name": name,
+                "label": label,
+                "status": status,
+                "critical": critical,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "message": message,
+                "checked_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            }
+        )
+
+    async def check_database():
+        await db.execute(sa_text("SELECT 1"))
+        return "ok", "Query round-trip ok"
+
+    async def check_redis():
+        client = None
+        try:
+            client = aioredis.from_url(
+                settings.REDIS_URL, decode_responses=True, socket_timeout=5
+            )
+            pong = await asyncio.wait_for(client.ping(), timeout=6)
+            host = urlparse(settings.REDIS_URL).hostname or "?"
+            port = urlparse(settings.REDIS_URL).port or 6379
+            if pong:
+                return "ok", f"PONG from {host}:{port}"
+            return "down", f"No PONG from {host}:{port}"
+        finally:
+            if client is not None:
+                await client.close()
+
+    def ping_workers_sync():
+        from app.tasks.celery_app import celery
+
+        pong = celery.control.inspect(timeout=5).ping() or {}
+        alive = sorted(
+            node for node, reply in pong.items()
+            if isinstance(reply, dict) and reply.get("ok") == "pong"
+        )
+        if alive:
+            return "ok", f"{len(alive)} worker(s) alive: {', '.join(alive)}"
+        return "down", "No worker replied — worker down or broker URL wrong"
+
+    async def check_worker():
+        return await asyncio.to_thread(ping_workers_sync)
+
+    async def check_beat():
+        # Beat refreshes health:beat_heartbeat every minute (see health_tasks).
+        client = None
+        try:
+            client = aioredis.from_url(
+                settings.REDIS_URL, decode_responses=True, socket_timeout=5
+            )
+            raw = await asyncio.wait_for(client.get("health:beat_heartbeat"), timeout=6)
+            if not raw:
+                return "down", "No heartbeat yet — beat hasn't ticked (or just restarted)"
+            ts = dt.datetime.fromisoformat(raw)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=dt.timezone.utc)
+            age = (dt.datetime.now(dt.timezone.utc) - ts).total_seconds()
+            if age < 150:
+                return "ok", f"Last tick {int(age)}s ago"
+            return "down", f"Last tick {int(age)}s ago — beat is not scheduling"
+        finally:
+            if client is not None:
+                await client.close()
+
+    async def check_instagram():
+        rows = (
+            (await db.execute(select(Account).where(Account.status == AccountStatus.active)))
+            .scalars()
+            .all()
+        )
+        if not rows:
+            return "warn", "No active accounts"
+        missing = [
+            a.username
+            for a in rows
+            if not os.path.exists(
+                a.session_file_path or session_path_for(a.username, settings.MEDIA_ROOT)
+            )
+        ]
+        if missing:
+            return "warn", f"Session file missing for: {', '.join(missing)}"
+        return "ok", f"{len(rows)}/{len(rows)} session files present"
+
+    async def check_proxies():
+        total = (
+            await db.execute(select(func.count(Proxy.id)).where(Proxy.is_active.is_(True)))
+        ).scalar() or 0
+        if not total:
+            return "warn", "No proxies configured — direct connection"
+        healthy = (
+            await db.execute(
+                select(func.count(Proxy.id)).where(
+                    Proxy.is_active.is_(True), Proxy.is_healthy.is_(True)
+                )
+            )
+        ).scalar() or 0
+        if healthy == total:
+            return "ok", f"{healthy}/{total} healthy"
+        return "warn", f"Only {healthy}/{total} healthy"
+
+    async def check_ffmpeg():
+        path = shutil.which("ffmpeg")
+        if path:
+            return "ok", f"Found at {path}"
+        return "down", "ffmpeg not on PATH — video processing will fail"
+
+    async def check_disk():
+        if not os.path.exists(settings.MEDIA_ROOT):
+            return "warn", f"{settings.MEDIA_ROOT} does not exist yet"
+        usage = shutil.disk_usage(settings.MEDIA_ROOT)
+        pct = (usage.used / usage.total * 100) if usage.total else 0
+        free_gb = usage.free / 1024**3
+        if pct >= 95:
+            return "down", f"Disk {pct:.0f}% full ({free_gb:.1f} GB free)"
+        if pct >= 85:
+            return "warn", f"Disk {pct:.0f}% full ({free_gb:.1f} GB free)"
+        return "ok", f"Disk {pct:.0f}% used ({free_gb:.1f} GB free)"
+
+    await run("database", "Database", True, check_database())
+    await run("redis", "Redis", True, check_redis())
+    await run("celery_worker", "Celery worker", True, check_worker())
+    await run("celery_beat", "Celery beat", True, check_beat())
+    await run("instagram", "Instagram sessions", False, check_instagram())
+    await run("proxies", "Proxies", False, check_proxies())
+    await run("ffmpeg", "FFmpeg", False, check_ffmpeg())
+    await run("disk", "Disk space", False, check_disk())
+
+    overall = "ok"
+    for r in results:
+        if r["status"] == "down" and r["critical"]:
+            overall = "down"
+            break
+        if r["status"] in ("down", "warn"):
+            overall = "warn"
+    return {
+        "overall": overall,
+        "checked_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "components": results,
+    }
+
+
 @analytics_router.get("/overview")
 async def overview(days: int = Query(default=30, ge=1, le=365), _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)

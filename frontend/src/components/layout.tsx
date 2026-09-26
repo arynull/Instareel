@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  BarChart3, CalendarClock, Captions, Clapperboard, Download, FileText, Home, Instagram,
+  BarChart3, CalendarClock, Captions, Clapperboard, Download, FileText, HeartPulse, Home, Instagram,
   LogOut, Menu, Moon, Music, Server, Settings, SlidersHorizontal, Smartphone, Sun, Users, History,
 } from "lucide-react";
 import { useTheme } from "next-themes";
@@ -24,6 +24,7 @@ const NAV = [
   { href: "/dashboard/audio", label: "Audio", icon: Music },
   { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/dashboard/server", label: "Server", icon: Server },
+  { href: "/dashboard/health", label: "Health", icon: HeartPulse },
   { href: "/dashboard/logs", label: "Logs", icon: FileText },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
