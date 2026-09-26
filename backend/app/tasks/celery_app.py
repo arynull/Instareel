@@ -33,6 +33,7 @@ celery.conf.beat_schedule = {
 
 # Explicit imports so workers always register tasks (autodiscover is
 # unreliable for the package that holds the Celery app itself, esp. on Windows).
+import app.tasks.health_tasks  # noqa: F401
 import app.tasks.periodic_tasks  # noqa: F401
 import app.tasks.post_tasks  # noqa: F401
 import app.tasks.source_tasks  # noqa: F401

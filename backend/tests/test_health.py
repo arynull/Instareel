@@ -228,3 +228,22 @@ def test_beat_heartbeat_writes_key(monkeypatch):
     ts = dt.datetime.fromisoformat(value)
     assert (dt.datetime.now(dt.timezone.utc) - ts).total_seconds() < 60
     assert ttl == 180
+
+
+def test_all_beat_scheduled_tasks_are_registered():
+    """Every task beat sends must be importable by the worker.
+
+    Regression test: tasks sent by name from beat_schedule are only
+    executed if the worker registered them (see the explicit imports in
+    celery_app — autodiscover is unreliable for that package). A missing
+    import means beat happily "sends" a task the worker rejects as
+    unregistered, e.g. the beat heartbeat never landing in Redis.
+    """
+    from app.tasks.celery_app import celery
+
+    schedule = celery.conf.beat_schedule
+    assert schedule, "beat_schedule must not be empty"
+    missing = sorted(
+        {entry["task"] for entry in schedule.values()} - set(celery.tasks.keys())
+    )
+    assert missing == [], f"beat sends unregistered tasks: {missing}"
