@@ -38,12 +38,27 @@ WATCHDOG_INTERVAL_MINUTES = 2
 WATCHDOG_GAP_FACTOR = 3
 
 
+def _watchdog_checks():
+    """Critical checks the watchdog runs — everything except the worker.
+
+    The watchdog executes on the worker itself, and under the solo pool the
+    worker's MainProcess is blocked running this task, so it can never
+    answer its own inspect().ping(). The /system/health endpoint still
+    checks the worker from the backend.
+    """
+    from app.services.health_checks import CRITICAL_CHECKS
+
+    return [c for c in CRITICAL_CHECKS if c[0] != "celery_worker"]
+
+
 @celery.task(name="tasks.health_tasks.system_watchdog")
 def system_watchdog():
     """Turn critical-component state CHANGES into dashboard notifications.
 
     Runs every WATCHDOG_INTERVAL_MINUTES on the worker. For each critical
-    component (database, Redis, Celery worker, Celery beat):
+    component except the Celery worker itself — database, Redis, Celery
+    beat — (the worker can't ping itself under the solo pool; /system/health
+    covers it from the backend):
     - down, with no unread "down" notification -> one critical notification
       (dedup_key ``watchdog:{name}:down`` fires exactly once per outage);
     - back up while an unread "down" notification exists -> the down
@@ -65,8 +80,15 @@ def system_watchdog():
 
     from app.database import SyncSessionLocal
     from app.models import Notification, Setting
-    from app.services.health_checks import CRITICAL_CHECKS
     from app.tasks.sync_helpers import NOTIFICATION_RETENTION_DAYS, get_setting, notify_sync
+
+    # The watchdog runs ON the worker, and the worker uses the solo pool:
+    # its MainProcess is blocked executing this very task, so it can never
+    # answer its own inspect().ping() — including the worker check here
+    # would raise a spurious "Celery worker down" critical notification
+    # every 2 minutes (and burn the 5s ping timeout each time). The
+    # /system/health endpoint still pings the worker from the backend.
+    checks = _watchdog_checks()
 
     try:
         now = _dt.datetime.now(_dt.timezone.utc)
@@ -106,7 +128,7 @@ def system_watchdog():
         # Each DB touch is its own short session: holding one session open
         # across checks + notify_sync (which opens its own) deadlocks
         # SQLite with "database is locked".
-        for name, label, check in CRITICAL_CHECKS:
+        for name, label, check in checks:
             status, message = check()
             dedup_key = f"watchdog:{name}:down"
             fire_down = False

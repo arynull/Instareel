@@ -327,3 +327,34 @@ def test_api_read_all_and_single(api_client):
     r = c.post("/api/v1/notifications/read-all")
     assert r.status_code == 200
     assert c.get("/api/v1/notifications").json()["unread_count"] == 0
+
+
+def test_post_age_hours_handles_naive_db_timestamp():
+    """Regression: fetch_all_analytics crashed with
+    TypeError: can't subtract offset-naive and offset-aware datetimes
+    because SQLite returns posted_at naive. Naive is UTC."""
+    from app.tasks.periodic_tasks import _post_age_hours
+
+    now = dt.datetime.now(dt.timezone.utc)
+    naive_posted = (now - dt.timedelta(hours=5)).replace(tzinfo=None)
+    aware_posted = now - dt.timedelta(hours=5)
+
+    assert _post_age_hours(naive_posted, now) == pytest.approx(5.0, abs=0.01)
+    assert _post_age_hours(aware_posted, now) == pytest.approx(5.0, abs=0.01)
+    assert _post_age_hours(None, now) == 1.0  # floored
+    # Future timestamps still floor at 1, never negative.
+    assert _post_age_hours(now + dt.timedelta(hours=2), now) == 1.0
+
+
+def test_watchdog_skips_self_worker_check():
+    """The watchdog runs ON the worker; under the solo pool the worker can
+    never answer its own inspect().ping(), so including the worker check
+    would emit a spurious 'Celery worker down' critical notification every
+    2 minutes. /system/health (backend) still covers the worker."""
+    from app.services.health_checks import CRITICAL_CHECKS
+    from app.tasks.health_tasks import _watchdog_checks
+
+    names = [c[0] for c in _watchdog_checks()]
+    assert "celery_worker" not in names
+    assert "celery_worker" in [c[0] for c in CRITICAL_CHECKS]
+    assert set(names) == {"database", "redis", "celery_beat"}

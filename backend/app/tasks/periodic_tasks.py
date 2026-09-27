@@ -15,6 +15,19 @@ MAX_ANALYTICS_PER_RUN = 20
 ANALYTICS_MIN_INTERVAL_HOURS = 3
 
 
+def _post_age_hours(posted_at: "dt.datetime | None", now: "dt.datetime") -> float:
+    """Hours since ``posted_at`` (floored at 1).
+
+    Naive DB timestamps (SQLite) are UTC — compare them against an aware
+    ``now`` directly and Python raises ``TypeError: can't subtract
+    offset-naive and offset-aware datetimes``.
+    """
+    from app.tasks.sync_helpers import as_aware_utc
+
+    ref = as_aware_utc(posted_at) or now
+    return max(1.0, (now - ref).total_seconds() / 3600)
+
+
 @celery.task(name="tasks.analytics_tasks.fetch_all_analytics")
 def fetch_all_analytics():
     import random
@@ -79,10 +92,7 @@ def fetch_all_analytics():
                 likes = info.get("like_count", 0)
                 comments = info.get("comment_count", 0)
                 views = info.get("view_count", 0)
-                age_h = max(
-                    1,
-                    (dt.datetime.now(dt.timezone.utc) - (posted_at or dt.datetime.now(dt.timezone.utc))).total_seconds() / 3600,
-                )
+                age_h = _post_age_hours(posted_at, dt.datetime.now(dt.timezone.utc))
                 eng = round((likes + comments) / max(1, views) * 100, 2) if views else 0.0
                 with SyncSessionLocal() as s:
                     p = s.get(Post, pid)
