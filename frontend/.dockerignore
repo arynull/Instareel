@@ -1,0 +1,15 @@
+# Build context hygiene.
+node_modules
+.next
+out
+__pycache__
+# VCS and docs.
+.git
+.gitignore
+*.md
+# This file and the Dockerfile itself.
+Dockerfile
+.dockerignore
+# Local env (build args come from compose, not files).
+.env
+.env.*

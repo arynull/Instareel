@@ -11,6 +11,15 @@ x-app-volumes: &app-volumes
   - ./data:/data
   - ./media:/data/media
 
+# M7: cap container log growth. json-file without rotation fills the disk
+# on a long-lived host (backend+worker+beat log every minute) and takes
+# the whole stack down. 5 x 10MB per service.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   # Opt-in profile: backend must ALSO get DATABASE_URL + SYNC_DATABASE_URL
   # pointing at postgres (see .env.example) — there is intentionally no
@@ -18,6 +27,9 @@ services:
   postgres:
     image: postgres:15-alpine
     restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-igfunnel}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
@@ -34,6 +46,9 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
+    logging: *default-logging
     command: redis-server --appendonly yes
     volumes:
       - redisdata:/data
@@ -46,16 +61,20 @@ services:
   backend:
     build: ./backend
     restart: unless-stopped
+    mem_limit: 1g
+    cpus: 1.0
+    logging: *default-logging
     env_file: .env
     environment:
       <<: *backend-env
     volumes:
       - ./data:/data
       - ./media:/data/media
-      # Read-only Docker socket for the Server panel's per-container stats.
-      # The API only calls list/stats (never create/exec); without it the
-      # panel still shows host CPU/RAM/disk with docker=false.
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # NOTE: the Docker socket used to be mounted here for the Server
+      # panel's per-container stats. Removed (m14): the backend runs as
+      # root, so a compromised backend meant full host control. The panel
+      # still shows host CPU/RAM/disk; per-container stats degrade to
+      # docker=false (see app/services/host_stats.py).
     depends_on:
       redis:
         condition: service_healthy
@@ -74,6 +93,9 @@ services:
   worker:
     build: ./backend
     restart: unless-stopped
+    mem_limit: 2g
+    cpus: 2.0
+    logging: *default-logging
     env_file: .env
     environment:
       <<: *backend-env
@@ -83,7 +105,9 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
-    command: celery -A app.tasks.celery_app.celery worker --loglevel=info --concurrency=2 --pool=solo
+    # --pool=solo runs a single process; --concurrency is a no-op with it
+    # (kept out to avoid implying parallelism that doesn't exist).
+    command: celery -A app.tasks.celery_app.celery worker --loglevel=info --pool=solo
     healthcheck:
       # inspect ping round-trips through the broker — proves the worker is
       # alive AND consuming, not just that the process exists.
@@ -96,6 +120,9 @@ services:
   beat:
     build: ./backend
     restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
+    logging: *default-logging
     env_file: .env
     environment:
       <<: *backend-env
@@ -105,7 +132,10 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
-    command: celery -A app.tasks.celery_app.celery beat --loglevel=info
+    # m13: the beat shelve lives on the ./data bind mount (not /code), so
+    # scheduler state survives container recreates instead of going
+    # ephemeral with the container filesystem.
+    command: celery -A app.tasks.celery_app.celery beat --loglevel=info --schedule /data/celerybeat-schedule.db
     healthcheck:
       # Beat has no inspect interface; PID 1 liveness is the signal. The
       # scheduler writes its state via the broker, so a dead beat is
@@ -125,6 +155,9 @@ services:
         NEXT_PUBLIC_API_URL: ${FRONTEND_API_URL:-}
         API_INTERNAL_URL: http://backend:8000
     restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
+    logging: *default-logging
     depends_on:
       backend:
         condition: service_healthy
@@ -141,16 +174,33 @@ services:
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.25
+    logging: *default-logging
     ports:
       - "${NGINX_PORT:-8080}:80"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Rendered from this template by the image's own entrypoint
+      # (20-envsubst-on-templates.sh): only CLIENT_MAX_BODY_SIZE is
+      # substituted (NGINX_ENVSUBST_FILTER) — nginx's own $variables are
+      # left untouched. Output lands on /etc/nginx/nginx.conf.
+      # m11: the opt-in profile was removed — nginx is the only ingress
+      # (backend/frontend publish no ports), so `docker compose up` must
+      # always start it; otherwise the stack came up with zero reachable
+      # ports despite the README quickstart.
+      - ./nginx/nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
+    environment:
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
+      NGINX_ENVSUBST_FILTER: CLIENT_MAX_BODY_SIZE
+      # Keep ~10% headroom above the backend's MAX_UPLOAD_MB (default 500):
+      # nginx 413s anything larger, so raising MAX_UPLOAD_MB past this
+      # value silently breaks all uploads.
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-550m}
     depends_on:
       backend:
         condition: service_healthy
       frontend:
         condition: service_healthy
-    profiles: ["nginx"]
 
 volumes:
   pgdata:

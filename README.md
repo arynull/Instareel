@@ -11,10 +11,12 @@ cp .env.example .env
 docker compose up --build
 ```
 
-- Default deploy is the nginx profile (`docker compose --profile nginx up --build -d`):
-  everything on `${NGINX_PORT:-8080}` — `/` → frontend, `/api/*` + `/ws` + docs → backend,
+- Default deploy includes nginx (the only ingress): everything on
+  `${NGINX_PORT:-8080}` — `/` → frontend, `/api/*` + `/ws` + docs → backend,
   same-origin (no CORS). The frontend image is baked for this (empty
   `NEXT_PUBLIC_API_URL`, internal rewrite to `http://backend:8000`).
+  `CLIENT_MAX_BODY_SIZE` must stay above the backend's `MAX_UPLOAD_MB`
+  (defaults: 550m vs 500) or nginx 413s uploads.
 - Only set `FRONTEND_API_URL` when exposing the frontend container directly
   (no nginx) — it is baked into the client bundle at build time.
 - API docs (`/docs`, `/openapi.json`) are disabled by default for security —

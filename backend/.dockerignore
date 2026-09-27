@@ -1,0 +1,26 @@
+# Build context hygiene: none of this belongs in the image layers.
+# media/ holds runtime uploads AND Instagram session files — a real
+# session dropped there must never be baked into image layers.
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+tests
+media/
+alembic/versions/__pycache__
+# Dev-only helpers (interactive logins, manual session export).
+manual_login.py
+session_from_browser.py
+# Secrets and local config.
+.env
+.env.*
+*.pem
+*.key
+# VCS and docs.
+.git
+.gitignore
+*.md
+# This file and the Dockerfile itself.
+Dockerfile
+.dockerignore
