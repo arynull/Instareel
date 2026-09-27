@@ -79,6 +79,59 @@ def test_pragmas_set(pragma_factory):
         assert s.execute(text("PRAGMA busy_timeout")).scalar() == 30000
 
 
+def test_async_connect_args_have_busy_timeout(tmp_path):
+    # The async engine shares one SQLite file between backend/worker/beat —
+    # it needs the same 30s connect busy-wait the sync engine already had.
+    assert database.connect_args.get("timeout") == 30
+    assert database.sync_connect_args.get("timeout") == 30
+
+
+def _pragma_triplet_sync(engine):
+    from sqlalchemy.orm import sessionmaker
+
+    s = sessionmaker(bind=engine)()
+    try:
+        return (
+            s.execute(text("PRAGMA foreign_keys")).scalar(),
+            s.execute(text("PRAGMA journal_mode")).scalar(),
+            s.execute(text("PRAGMA busy_timeout")).scalar(),
+        )
+    finally:
+        s.close()
+
+
+def test_production_wiring_sync_engine_pragmas(tmp_path):
+    """The module's own sync wiring (connect_args + listener) yields the
+    hardened PRAGMAs on a real connection."""
+    from sqlalchemy import create_engine
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path}/w.db", connect_args=dict(database.sync_connect_args)
+    )
+    event.listen(engine, "connect", database._sqlite_pragmas)
+    assert _pragma_triplet_sync(engine) == (1, "wal", 30000)
+
+
+def test_production_wiring_async_engine_pragmas(tmp_path):
+    """Same for the async engine: PRAGMAs must land on its connections too."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path}/w.db",
+        connect_args=dict(database.connect_args),
+    )
+    event.listen(engine.sync_engine, "connect", database._sqlite_pragmas)
+
+    async def _check():
+        async with engine.connect() as conn:
+            fk = (await conn.execute(text("PRAGMA foreign_keys"))).scalar()
+            jm = (await conn.execute(text("PRAGMA journal_mode"))).scalar()
+            bt = (await conn.execute(text("PRAGMA busy_timeout"))).scalar()
+        return fk, jm, bt
+
+    assert _run(_check()) == (1, "wal", 30000)
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     """Minimal async TestClient with dependency overrides (mirrors e2e)."""

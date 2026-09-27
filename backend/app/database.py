@@ -38,7 +38,10 @@ def _sqlite_pragmas(dbapi_conn, _connection_record):
 
 connect_args = {}
 if settings.DATABASE_URL.startswith("sqlite"):
-    connect_args = {"check_same_thread": False}
+    # timeout: sqlite3 busy-wait on connect, matching the 30s PRAGMA
+    # busy_timeout below (the sync engine already had this; the async one
+    # didn't — three processes share one SQLite file).
+    connect_args = {"check_same_thread": False, "timeout": 30}
 
 engine = create_async_engine(settings.DATABASE_URL, echo=False, connect_args=connect_args)
 if settings.DATABASE_URL.startswith("sqlite"):

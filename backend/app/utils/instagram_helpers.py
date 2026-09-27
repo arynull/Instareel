@@ -47,6 +47,33 @@ def dump_session_settings(client, path: str) -> None:
         pass
 
 
+def harden_session_dir(media_root: str) -> None:
+    """chmod 0o700 on sessions/ and 0o600 on every existing session file.
+
+    dump_session_settings() locks files down at write time (m7), but files
+    created before m7 — or by any other writer — may still be world-readable.
+    Session dumps hold long-lived IG auth cookies, so fix up whatever is on
+    disk at startup (API lifespan + worker ready) instead of trusting history.
+    Best-effort: never raises.
+    """
+    d = os.path.join(media_root, "sessions")
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        return
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for name in names:
+        p = os.path.join(d, name)
+        try:
+            if os.path.isfile(p) and not os.path.islink(p):
+                os.chmod(p, 0o600)
+        except OSError:
+            continue
+
+
 def session_owner_info(payload: object) -> "tuple[str | None, str | None]":
     """Stable owner identity of an instagrapi session dump (pure — unit tested).
 

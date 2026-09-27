@@ -249,6 +249,15 @@ def _start_alive_thread(**kwargs) -> None:
     if getattr(_start_alive_thread, "_started", False):
         return
     _start_alive_thread._started = True
+    # The worker loads IG session files: lock down whatever is on disk,
+    # including files written before the 0o600-at-dump hardening (m7).
+    try:
+        from app.config import settings
+        from app.utils.instagram_helpers import harden_session_dir
+
+        harden_session_dir(settings.MEDIA_ROOT)
+    except Exception:
+        log.warning("session dir hardening failed", exc_info=True)
     threading.Thread(target=_alive_loop, name="worker-alive", daemon=True).start()
 
 

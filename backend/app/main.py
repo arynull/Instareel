@@ -69,6 +69,11 @@ async def lifespan(application: FastAPI):
     os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
     for sub in ("raw", "processed", "thumbnails", "sessions", "audio", "profile_pics"):
         os.makedirs(os.path.join(settings.MEDIA_ROOT, sub), exist_ok=True)
+    # Session dumps hold IG auth cookies: lock down whatever is on disk,
+    # including files written before the 0o600-at-dump hardening (m7).
+    from app.utils.instagram_helpers import harden_session_dir
+
+    harden_session_dir(settings.MEDIA_ROOT)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     from app.api.system import seed_default_settings
