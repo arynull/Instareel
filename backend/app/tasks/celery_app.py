@@ -40,3 +40,4 @@ import app.tasks.periodic_tasks  # noqa: F401
 import app.tasks.post_tasks  # noqa: F401
 import app.tasks.source_tasks  # noqa: F401
 import app.tasks.video_tasks  # noqa: F401
+import app.tasks.worker_signals  # noqa: F401 — task_prerun/postrun liveness signals

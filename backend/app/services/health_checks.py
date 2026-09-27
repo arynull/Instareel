@@ -5,8 +5,8 @@
 - The ``system_watchdog`` Celery task, which turns state *changes* into
   dashboard notifications.
 
-Each check returns ``(status, message)`` where status is ``"ok"`` or
-``"down"``. Checks are the 4 critical pipeline dependencies: database,
+Each check returns ``(status, message)`` where status is ``"ok"``, ``"warn"``
+or ``"down"``. Checks are the 4 critical pipeline dependencies: database,
 Redis, Celery worker, Celery beat (via its per-minute heartbeat key — a
 live beat process that stopped ticking still counts as down). A check must
 never raise; unexpected errors are reported as ``"down"`` with the
@@ -66,6 +66,7 @@ def check_redis_sync() -> tuple[str, str]:
 
 @_verdict
 def check_worker_sync() -> tuple[str, str]:
+    from app.tasks import worker_signals as _ws
     from app.tasks.celery_app import celery
 
     pong = celery.control.inspect(timeout=5).ping() or {}
@@ -76,6 +77,21 @@ def check_worker_sync() -> tuple[str, str]:
     )
     if alive:
         return "ok", f"{len(alive)} worker(s) alive: {', '.join(alive)}"
+    # No ping reply. Under the solo pool the worker can't answer while it
+    # executes a task — consult the liveness signals before crying "down".
+    state = _ws.read_worker_state()
+    if state and state["alive"]:
+        task = state.get("current_task") or {}
+        name = task.get("task", "")
+        if name:
+            age = _ws.task_age_human(task.get("started_at"))
+            return (
+                "warn",
+                f"Worker is busy {_ws.describe_task(name)}"
+                + (f" (started {age})" if age else "")
+                + " — alive, but can't answer ping while a task runs (solo pool)",
+            )
+        return "warn", "Worker process is alive but didn't answer ping (transient)"
     return "down", "No worker replied — worker down or broker URL wrong"
 
 

@@ -51,6 +51,23 @@ def _watchdog_checks():
     return [c for c in CRITICAL_CHECKS if c[0] != "celery_worker"]
 
 
+def _busy_task_during_gap(last_run: dt.datetime) -> str | None:
+    """Task name that kept the worker busy through the watchdog gap (if any).
+
+    Delegates to worker_signals.busy_task_during_gap; kept as a thin wrapper
+    so tests can patch one place.
+    """
+    from app.tasks import worker_signals as _ws
+
+    return _ws.busy_task_during_gap(last_run)
+
+
+def _describe_busy_task(task_name: str) -> str:
+    from app.tasks import worker_signals as _ws
+
+    return _ws.describe_task(task_name)
+
+
 @celery.task(name="tasks.health_tasks.system_watchdog")
 def system_watchdog():
     """Turn critical-component state CHANGES into dashboard notifications.
@@ -67,9 +84,10 @@ def system_watchdog():
 
     It also detects scheduler gaps: when the previous watchdog run is older
     than WATCHDOG_GAP_FACTOR x interval, the worker or beat was down in
-    between, so it posts a warning that scheduled posts may have been
-    missed — the complement of the posting grace window, which only covers
-    brief outages.
+    between — unless recorded task activity shows the worker was simply
+    busy with a long task (solo pool), in which case a calmer "Worker was
+    busy" note is posted instead. Either way this is the complement of the
+    posting grace window, which only covers brief outages.
 
     Finally it prunes notifications older than NOTIFICATION_RETENTION_DAYS.
     Never raises: monitoring must not break the worker.
@@ -95,6 +113,7 @@ def system_watchdog():
 
         # --- scheduler gap detection (worker/beat were down) ---
         gap_minutes: int | None = None
+        last_run: "_dt.datetime | None" = None
         with SyncSessionLocal() as session:
             last_raw = get_setting(session, "watchdog_last_run", "")
             if last_raw:
@@ -114,15 +133,45 @@ def system_watchdog():
                 row.value = now.isoformat()
             session.commit()
         if gap_minutes is not None:
-            notify_sync(
-                "scheduler_gap",
-                "warning",
-                "Scheduler was down",
-                f"No watchdog run for ~{gap_minutes} minutes — the worker or beat "
-                "was down. Scheduled posts in that window may have been "
-                "missed (the grace window only covers brief outages).",
-                link="/dashboard/health",
-            )
+            # Under the solo pool a long task (reel upload, FFmpeg) delays
+            # the watchdog itself — that is the worker doing its job, not an
+            # outage. Only cry "down" when no task activity explains the gap.
+            busy_task = _busy_task_during_gap(last_run) if last_run else None
+            if busy_task:
+                from app.config import settings as _settings
+
+                grace = _settings.SCHEDULE_GRACE_MINUTES
+                label = _describe_busy_task(busy_task)
+                if gap_minutes > grace:
+                    notify_sync(
+                        "scheduler_busy",
+                        "warning",
+                        "Worker was busy",
+                        f"No watchdog run for ~{gap_minutes} minutes — the worker was busy "
+                        f"{label}. A scheduled slot in that window may have been missed "
+                        f"(longer than the {grace}-minute grace window).",
+                        link="/dashboard/health",
+                    )
+                else:
+                    notify_sync(
+                        "scheduler_busy",
+                        "info",
+                        "Worker was busy",
+                        f"No watchdog run for ~{gap_minutes} minutes — the worker was busy "
+                        f"{label}. Within the {grace}-minute grace window, so no scheduled "
+                        "slot was lost.",
+                        link="/dashboard/health",
+                    )
+            else:
+                notify_sync(
+                    "scheduler_gap",
+                    "warning",
+                    "Scheduler was down",
+                    f"No watchdog run for ~{gap_minutes} minutes — the worker or beat "
+                    "was down. Scheduled posts in that window may have been "
+                    "missed (the grace window only covers brief outages).",
+                    link="/dashboard/health",
+                )
 
         # --- per-component state transitions ---
         # Each DB touch is its own short session: holding one session open
