@@ -257,6 +257,59 @@ def test_busy_gap_no_redis_returns_none(monkeypatch):
     assert worker_signals.busy_task_during_gap(_now() - dt.timedelta(minutes=10)) is None
 
 
+def test_busy_gap_worker_restarted_mid_gap_returns_none(fake_redis):
+    # Regression: the 24h last_task key survives a worker restart, so a gap
+    # that is really an outage (crash, deploy, failed container recreate)
+    # was mislabeled "Worker was busy" from a stale pre-restart task. When
+    # the worker (re)started after the last watchdog run, the gap holds a
+    # genuine outage -> None ("Scheduler was down").
+    now = _now()
+    _set_alive(fake_redis, 5)
+    fake_redis.set(
+        worker_signals.WORKER_STARTED_AT_KEY,
+        (now - dt.timedelta(minutes=4)).isoformat(),
+        ex=7 * 86400,
+    )
+    fake_redis.set(
+        worker_signals.WORKER_LAST_TASK_KEY,
+        json.dumps(
+            {
+                "task": "tasks.proxy_tasks.check_all_proxies",
+                "started_at": (now - dt.timedelta(minutes=12)).isoformat(),
+                "finished_at": (now - dt.timedelta(minutes=11, seconds=55)).isoformat(),
+            }
+        ),
+    )
+    assert worker_signals.busy_task_during_gap(now - dt.timedelta(minutes=11)) is None
+
+
+def test_busy_gap_worker_started_before_last_run_still_blames_task(fake_redis):
+    # No restart mid-gap (worker started before the last watchdog run):
+    # the previous behavior is preserved — the last finished task explains
+    # the gap.
+    now = _now()
+    _set_alive(fake_redis, 5)
+    fake_redis.set(
+        worker_signals.WORKER_STARTED_AT_KEY,
+        (now - dt.timedelta(hours=2)).isoformat(),
+        ex=7 * 86400,
+    )
+    fake_redis.set(
+        worker_signals.WORKER_LAST_TASK_KEY,
+        json.dumps(
+            {
+                "task": "tasks.video_tasks.process_video",
+                "started_at": (now - dt.timedelta(minutes=9)).isoformat(),
+                "finished_at": (now - dt.timedelta(minutes=4)).isoformat(),
+            }
+        ),
+    )
+    assert (
+        worker_signals.busy_task_during_gap(now - dt.timedelta(minutes=10))
+        == "tasks.video_tasks.process_video"
+    )
+
+
 # ---- check_worker_sync: warn, not down, when busy ----
 
 

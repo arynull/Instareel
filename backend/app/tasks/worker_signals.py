@@ -18,6 +18,10 @@ raised):
   keep running under the solo pool even while the main thread is blocked
   inside a task, so a fresh key proves the *process* is alive even when
   ping can't be answered.
+- ``worker_ready`` also records ``health:worker_started_at``. The last-task
+  key survives a worker restart (24h TTL), so without this a gap that is
+  really an outage (crash, deploy, failed container recreate) would be
+  mislabeled "Worker was busy" from a stale pre-restart task.
 
 Readers:
 
@@ -49,6 +53,13 @@ WORKER_CURRENT_TASK_TTL = 7200
 #: {task, started_at, finished_at} of the most recently finished task.
 WORKER_LAST_TASK_KEY = "health:worker_last_task"
 WORKER_LAST_TASK_TTL = 86400
+
+#: ISO-8601 instant of the last worker (re)start, set on worker_ready.
+#: Lets gap forensics tell "worker restarted mid-gap" (genuine outage)
+#: apart from "worker was busy the whole time". Overwritten on every
+#: start; the TTL is only cleanup.
+WORKER_STARTED_AT_KEY = "health:worker_started_at"
+WORKER_STARTED_AT_TTL = 7 * 86400
 
 #: Human labels for busy messages; unknown tasks fall back to a prettified
 #: version of their last dotted segment.
@@ -148,6 +159,13 @@ def busy_task_during_gap(last_run: dt.datetime) -> str | None:
     state = read_worker_state()
     if not state:
         return None
+    started_at = _parse_iso(state.get("started_at"))
+    if started_at is not None and started_at > last_run:
+        # The worker (re)started after the last watchdog run: the gap holds
+        # a genuine outage (crash, deploy, failed container recreate). The
+        # 24h last_task key may still name a pre-restart task — it must not
+        # mislabel this outage as "busy".
+        return None
     cur = state.get("current_task") or {}
     task_name = cur.get("task", "")
     if task_name and task_name != _WATCHDOG_TASK_NAME:
@@ -167,7 +185,7 @@ def busy_task_during_gap(last_run: dt.datetime) -> str | None:
 def read_worker_state() -> dict | None:
     """Best-effort worker liveness snapshot; None when Redis is unreachable.
 
-    Returns ``{"alive": bool, "alive_age_s": float | None,
+    Returns ``{"alive": bool, "alive_age_s": float | None, "started_at": str | None,
     "current_task": dict | None, "last_task": dict | None}``.
     """
     try:
@@ -181,6 +199,7 @@ def read_worker_state() -> dict | None:
             return {
                 "alive": alive_age is not None and alive_age < WORKER_ALIVE_STALE_AFTER_SECONDS,
                 "alive_age_s": alive_age,
+                "started_at": client.get(WORKER_STARTED_AT_KEY),
                 "current_task": _json_get(client, WORKER_CURRENT_TASK_KEY),
                 "last_task": _json_get(client, WORKER_LAST_TASK_KEY),
             }
@@ -266,6 +285,16 @@ def _start_alive_thread(**kwargs) -> None:
     if getattr(_start_alive_thread, "_started", False):
         return
     _start_alive_thread._started = True
+    # Record the (re)start instant for gap forensics (see module docstring).
+    # Best-effort: monitoring must never break worker startup.
+    try:
+        client = _redis_client()
+        try:
+            client.set(WORKER_STARTED_AT_KEY, _utcnow().isoformat(), ex=WORKER_STARTED_AT_TTL)
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001
+        log.warning("worker_signals: failed to record worker start", exc_info=True)
     # The worker loads IG session files: lock down whatever is on disk,
     # including files written before the 0o600-at-dump hardening (m7).
     try:
