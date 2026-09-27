@@ -32,6 +32,28 @@ def check_and_post(self):
             slots = sched.due_rule_slots(s)
             created = 0
             used_video_ids: set[int] = set()
+
+            def _notify_skip(rule, slot_utc, reason: str):
+                """One warning per slot when a matched slot can't fire.
+
+                A silently skipped slot is the worst outcome: the bell's
+                "upcoming" countdown reaches zero and then nothing happens
+                with no explanation. Deduped per rule+slot so the ticks
+                inside the grace window notify exactly once.
+                """
+                from zoneinfo import ZoneInfo
+
+                local_slot = slot_utc.astimezone(ZoneInfo(sched.settings.SCHEDULE_TZ))
+                notify_sync(
+                    "slot_skipped",
+                    "warning",
+                    f"Rule '{rule.name}' skipped its {local_slot:%H:%M} slot",
+                    f"Scheduled slot {local_slot:%H:%M} for rule '{rule.name}' "
+                    f"did not fire: {reason}.",
+                    link="/dashboard/schedule",
+                    dedup_key=f"slot_skip:{rule.id}:{slot_utc:%Y%m%d%H%M}",
+                )
+
             for rule, slot_utc in slots:
                 if sched.slot_already_fired(s, rule, slot_utc):
                     # This slot already has its post row (any status) —
@@ -39,9 +61,19 @@ def check_and_post(self):
                     # queue another post for the same slot.
                     continue
                 if sched.already_scheduled(s, rule):
+                    _notify_skip(
+                        rule, slot_utc,
+                        "another post is already scheduled within ±10 min "
+                        "for this account",
+                    )
                     continue
                 account = sched.eligible_account(s, rule.account_id)
                 if not account:
+                    _notify_skip(
+                        rule, slot_utc,
+                        sched.account_skip_reason(s, rule.account_id)
+                        or "no eligible account",
+                    )
                     continue
                 if not sched.account_reachable(s, account):
                     # Its proxy is down and no spare is healthy — leave the
@@ -73,6 +105,16 @@ def check_and_post(self):
                         log_event_sync(
                             "INFO", "schedule",
                             f"Rule '{rule.name}' waiting: pinned video not postable yet",
+                        )
+                        _notify_skip(
+                            rule, slot_utc,
+                            "pinned video is not ready yet (still processing "
+                            "or already queued)",
+                        )
+                    else:
+                        _notify_skip(
+                            rule, slot_utc,
+                            "no processed video in the queue",
                         )
                     continue
                 caption, tags = sched.resolve_fire_caption(

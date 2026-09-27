@@ -663,6 +663,45 @@ def eligible_account(session, account_id: "int | None" = None):
     return None
 
 
+def account_skip_reason(session, account_id: "int | None") -> str | None:
+    """Why eligible_account() found nothing — None when an account is eligible.
+
+    Mirrors the checks in eligible_account() so a skipped rule slot can say
+    *why* instead of disappearing silently. Call only after eligible_account()
+    returned None.
+    """
+    from app.models import Account, AccountStatus
+
+    now = _now()
+    if account_id:
+        acc = session.get(Account, account_id)
+        if acc is None:
+            return "the rule's account no longer exists"
+        if acc.status != AccountStatus.active:
+            return f"@{acc.username} is {acc.status.value}"
+        cd = as_aware_utc(acc.cooldown_until)
+        if cd and cd > now:
+            return f"@{acc.username} is in cooldown until {cd:%H:%M} UTC"
+        cap = effective_max_posts(acc.created_at, acc.max_daily_posts, now)
+        if acc.posts_today >= cap:
+            warm = ""
+            created = acc.created_at
+            if created is not None:
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=dt.timezone.utc)
+                if (now - created).days < WARMUP_DAYS:
+                    warm = (
+                        f" — new-account warm-up: max {WARMUP_MAX_POSTS}/day "
+                        f"for the first {WARMUP_DAYS} days"
+                    )
+            return (
+                f"daily post limit reached for @{acc.username} "
+                f"({acc.posts_today}/{cap} posted today){warm}"
+            )
+        return None  # eligible — shouldn't happen after a real skip
+    return "no active account with remaining daily capacity"
+
+
 def next_video(session, effect: "str | None" = None):
     """Oldest processed video, preferring the rule's effect; fallback to any."""
     from app.models import Video, VideoStatus
