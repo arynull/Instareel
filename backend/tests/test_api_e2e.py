@@ -899,7 +899,10 @@ class TestPostingPipeline:
 
         maker = self._setup(tmp_path, monkeypatch)
         r1 = check_and_post.apply().get()
-        assert r1["created"] == 1 and r1["fired"] == 1, r1
+        # Fresh posts take the ETA path (apply_async with the jitter
+        # countdown, executed eagerly here); the tick backstop has nothing
+        # left to fire.
+        assert r1["created"] == 1 and r1["fired"] == 0, r1
         s = maker()
         posts = s.execute(select(Post)).scalars().all()
         assert len(posts) == 1 and posts[0].status == PostStatus.posted
@@ -921,7 +924,8 @@ class TestPostingPipeline:
         maker = self._setup(tmp_path, monkeypatch)
         self.fail_with = "generic: boom"
         r1 = check_and_post.apply().get()
-        assert r1["created"] == 1 and r1["fired"] == 1
+        # ETA path (eager): created by the tick, executed by apply_async.
+        assert r1["created"] == 1 and r1["fired"] == 0
         s = maker()
         posts = s.execute(select(Post)).scalars().all()
         assert len(posts) == 1 and posts[0].status == PostStatus.failed

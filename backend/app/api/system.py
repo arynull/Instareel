@@ -81,7 +81,8 @@ async def system_health(
         check_beat_sync,
         check_database_sync,
         check_redis_sync,
-        check_worker_sync,
+        check_worker_fast_sync,
+        check_worker_slow_sync,
     )
     from app.utils.instagram_helpers import session_path_for
 
@@ -161,7 +162,8 @@ async def system_health(
 
     await run("database", "Database", True, asyncio.to_thread(check_database_sync))
     await run("redis", "Redis", True, asyncio.to_thread(check_redis_sync))
-    await run("celery_worker", "Celery worker", True, asyncio.to_thread(check_worker_sync))
+    await run("celery_worker_fast", "Celery worker (fast lane)", True, asyncio.to_thread(check_worker_fast_sync))
+    await run("celery_worker_slow", "Celery worker (slow lane)", True, asyncio.to_thread(check_worker_slow_sync))
     await run("celery_beat", "Celery beat", True, asyncio.to_thread(check_beat_sync))
     await run("instagram", "Instagram sessions", False, check_instagram())
     await run("proxies", "Proxies", False, check_proxies())
@@ -388,6 +390,23 @@ DEFAULT_SETTINGS = {
     # 1/day (anti-ban protection). 0 disables it — e.g. when the Instagram
     # account is years old and was only recently connected here.
     "warmup_days": ("7", "scheduler"),
+    # Shadowban / action-block protection (anti-ban). The shadowban scan
+    # (tasks.account_tasks.scan_shadowban, every 6h) pauses an account when
+    # its recent reels' views collapse vs. its baseline; an action block
+    # (Instagram "feedback_required" on upload) cools the account down for
+    # action_block_cooldown_hours with a rotated proxy.
+    "shadowban_scan_enabled": ("true", "scheduler"),
+    "shadowban_pause_hours": ("48", "scheduler"),
+    "shadowban_min_baseline_views": ("100", "scheduler"),
+    "shadowban_min_recent_posts": ("3", "scheduler"),
+    "shadowban_collapse_ratio": ("0.10", "scheduler"),
+    "action_block_cooldown_hours": ("24", "scheduler"),
+    # Dispatch dedup: a dispatched_at stamp older than this many minutes is
+    # treated as a lost dispatch (broker/queue hiccup) and the tick
+    # re-dispatches the post instead of losing it. Must comfortably exceed
+    # the worst-case slow-lane queue wait, or healthy queued posts get
+    # (harmless but wasteful) duplicate queue entries.
+    "dispatch_stale_minutes": ("30", "scheduler"),
     "pool_country": ("", "proxy"),
     "pool_require_country": ("false", "proxy"),
     "pool_purge_after_days": ("7", "proxy"),

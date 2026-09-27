@@ -5,12 +5,19 @@ import random
 
 log = logging.getLogger("igfunnel.instagram")
 
-CHALLENGE_MARKERS = ("challenge_required", "checkpoint_required", "feedback_required")
+CHALLENGE_MARKERS = ("challenge_required", "checkpoint_required")
+#: Instagram's *action block* (temporary restriction on posting/liking —
+#: "feedback_required"). Unlike a login challenge it lifts on its own, so it
+#: gets its own kind: it must never park the account in challenge_required
+#: (which demands manual intervention) and must not be retried in minutes.
+ACTION_BLOCK_MARKERS = ("feedback_required",)
 THROTTLE_MARKERS = ("throttled", "slow down", "try again later", "rate limit")
 
 
 def _classify(exc: Exception) -> str:
     msg = f"{type(exc).__name__}: {exc}".lower()
+    if any(m in msg for m in ACTION_BLOCK_MARKERS):
+        return "action_blocked"
     if any(m in msg for m in CHALLENGE_MARKERS):
         return "challenge"
     if "login_required" in msg or "login required" in msg:
@@ -34,7 +41,10 @@ def _feed_with_retry(cl) -> "tuple[bool, str]":
         return True, ""
     except Exception as exc:
         kind = _classify(exc)
-        if kind in ("challenge", "login_required"):
+        if kind in ("challenge", "login_required", "action_blocked"):
+            # Auth failures AND action blocks return immediately: a retry
+            # after 5s can't fix either, and for an action block every extra
+            # request risks extending it.
             return False, kind
         time.sleep(5)
         try:
@@ -149,6 +159,7 @@ class InstagramService:
                 "challenge": "Instagram demands verification on this route — complete it in the app/browser, then re-test.",
                 "login_required": "Session rejected via this route (IP change or killed session) — refresh the session.",
                 "throttled": "This egress IP is rate-limited by Instagram — use another proxy.",
+                "action_blocked": "Instagram action block on this route (temporary restriction) — the account is cooling down; no session refresh needed.",
             }.get(kind, "Network/proxy path failed — check the proxy itself (Test button).")
             log.info("Session check for %s: invalid (%s)", username, kind)
             return False, f"{kind}: {hint}"

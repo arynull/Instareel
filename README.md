@@ -28,13 +28,52 @@ docker compose up --build
 | Service  | Role |
 |----------|------|
 | backend  | FastAPI + Uvicorn (port 8000) |
-| worker   | Celery worker (video queue + posts queue) |
+| worker-fast | Celery worker, fast lane: scheduler ticks, watchdog, heartbeats, proxy checks |
+| worker-slow | Celery worker, slow lane: FFmpeg processing, uploads, source ingest, analytics |
 | beat     | Celery Beat (per-minute scheduler, analytics 4h, bio rotation, proxy checks, cleanup) |
 | redis    | Broker + result backend + realtime pub/sub + progress keys |
 | frontend | Next.js 14 dashboard |
 | postgres | Optional — enable with `DATABASE_URL=postgresql+asyncpg://…` and `--profile postgres` |
 
 Default is SQLite (`./data/app.db` bind-mounted from the repo root) — zero-config.
+
+### Task lanes
+
+Both workers run `--pool=solo` (one task at a time per process). Without
+lanes, a 10-minute FFmpeg render would stall the per-minute scheduler ticks
+queued behind it — late posts and phantom "Scheduler was down" watchdog
+gaps. So tasks are routed to two queues (`backend/app/tasks/celery_app.py`:
+`TASK_FAST_QUEUE`/`TASK_SLOW_QUEUE`, `SLOW_TASKS`): `process_video`,
+`execute_post`, `ingest_source` and `fetch_all_analytics` go to `slow`;
+everything else (scheduler, watchdog, heartbeats, proxy checks, cleanup)
+stays on `fast`. Each compose worker consumes exactly one queue
+(`-Q fast` / `-Q slow`) and sets `WORKER_LANE` so health signals stay
+per-lane. Never set a `cpus`/`mem_limit` above the smallest host you
+deploy to (a 1-vCPU box rejects `cpus: 2.0` at container-create time).
+
+### Anti-detection & reliability
+
+- **Human-like posting jitter**: each fired slot gets a random 0–N minute
+  offset (setting `post_jitter_minutes`, default 5) with second resolution —
+  the post is dispatched to the slow lane via `apply_async(countdown=…)`
+  at the exact second, not rounded to the next minute tick.
+- **Exactly-once dispatch**: every post created by the tick is stamped
+  `dispatched_at`; the per-minute backstop atomically
+  (`UPDATE … WHERE … RETURNING`) picks up only unstamped posts (manual/API
+  schedules) or stamps older than `dispatch_stale_minutes` (default 30 —
+  re-dispatched, never lost). The atomic `claim_post` guarantees no
+  double-upload even if two tasks ever race.
+- **Action-block detection**: `feedback_required` from Instagram → account
+  goes to `cooldown` for `action_block_cooldown_hours` (default 24), proxy
+  rotates to a proven spare if one exists, and a dedicated warning
+  notification fires (deduped daily). No pointless retries against a block.
+- **Shadowban scan** (every 6h, `shadowban_scan_enabled`): compares the
+  median 24h views of recent posts against the median 7d views of the
+  account's baseline — a collapse below `shadowban_collapse_ratio`
+  (default 0.10) pauses the account for `shadowban_pause_hours` (default
+  48) and notifies; recovery auto-resumes only cooldowns that match the
+  shadowban episode, never manual pauses. Tunables:
+  `shadowban_min_baseline_views`, `shadowban_min_recent_posts`.
 
 ## Local dev (no Docker)
 
@@ -45,7 +84,12 @@ cd backend
 pip install -r requirements.txt
 cp ../.env.example ../.env   # or set env vars
 uvicorn app.main:app --reload
-celery -A app.tasks.celery_app.celery worker --loglevel=info
+# Two lane workers (see "Task lanes" below): the fast lane runs scheduler
+# ticks/watchdog, the slow lane FFmpeg/uploads/ingest/analytics. For a
+# quick single-worker dev setup, drain both queues with -Q fast,slow and
+# leave WORKER_LANE unset.
+WORKER_LANE=fast celery -A app.tasks.celery_app.celery worker --loglevel=info --pool=solo -Q fast --hostname=fast
+WORKER_LANE=slow celery -A app.tasks.celery_app.celery worker --loglevel=info --pool=solo -Q slow --hostname=slow
 celery -A app.tasks.celery_app.celery beat --loglevel=info
 alembic upgrade head          # REQUIRED on existing DBs — startup only creates missing *tables*, never new *columns*
 ```
@@ -70,7 +114,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 
 ## Database
 
-Alembic migrations `0001_initial` → … → `0017_notifications` cover the whole
+Alembic migrations `0001_initial` → … → `0018_post_dispatched_at` cover the whole
 schema — always run `alembic upgrade head` after pulling.
 Models live in `backend/app/models/`; secrets (IG passwords, proxy passwords)
 are Fernet-encrypted at rest — set a persistent `FERNET_KEY` in `.env`

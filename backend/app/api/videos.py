@@ -601,6 +601,11 @@ async def retry_post(post_id: int, _: str = Depends(get_current_admin), db: Asyn
     import datetime as dt
 
     p.scheduled_for = dt.datetime.now(dt.timezone.utc)
+    # Clear the dispatch stamp: the retry means "dispatch now", and if the
+    # direct delay() below can't reach the broker (500 after commit), the
+    # tick backstop must see this as an unstamped post and recover it on the
+    # next tick — not skip it for dispatch_stale_minutes.
+    p.dispatched_at = None
     await db.commit()
     from app.tasks.post_tasks import execute_post
 

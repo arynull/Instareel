@@ -231,25 +231,36 @@ def test_execute_post_auth_failure_marks_failed(factory, tmp_path, monkeypatch):
 
 
 def test_full_tick_posts_end_to_end(factory, tmp_path, monkeypatch):
-    """check_and_post → execute_post wired together (delay bridged in-process)."""
+    """check_and_post → execute_post wired together (ETA dispatch bridged
+    in-process). The tick hands the fresh post to the slow lane via
+    apply_async(countdown=...), not the backstop's delay()."""
     import app.tasks.post_tasks as pt_mod
 
     _seed(factory, tmp_path)
     _patch_ig(monkeypatch)
 
     real_task = pt_mod.execute_post
-    fired: list[int] = []
-    monkeypatch.setattr(
-        pt_mod, "execute_post",
-        type("Bridge", (), {"delay": staticmethod(fired.append)}),
-    )
+    eta_fired: list[tuple[int, float]] = []
+    delayed: list[int] = []
+
+    class Bridge:
+        @staticmethod
+        def apply_async(args=None, countdown=0, **kwargs):
+            eta_fired.append((args[0], countdown))
+
+        @staticmethod
+        def delay(pid):
+            delayed.append(pid)
+
+    monkeypatch.setattr(pt_mod, "execute_post", Bridge)
 
     tick = pt_mod.check_and_post.apply().get()
-    assert tick["created"] == 1 and len(fired) == 1
+    assert tick["created"] == 1 and len(eta_fired) == 1
+    assert delayed == [], "fresh post must take the ETA path, not the backstop"
 
     # Swap the bridge back for the real executor and run the fired id.
     monkeypatch.setattr(pt_mod, "execute_post", real_task)
-    out = real_task.apply(args=[fired[0]]).get()
+    out = real_task.apply(args=[eta_fired[0][0]]).get()
     assert out["status"] == "posted"
 
 

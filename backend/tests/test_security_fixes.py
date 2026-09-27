@@ -351,7 +351,7 @@ def _compose_service_blocks():
     text = (REPO / "docker-compose.yml").read_text()
     blocks, current = {}, None
     for line in text.splitlines():
-        m = re.match(r"^  ([a-z_][a-z0-9_]*):\s*$", line)
+        m = re.match(r"^  ([a-z_][a-z0-9_-]*):\s*$", line)
         if m:
             current = m.group(1)
             blocks[current] = []
@@ -362,10 +362,14 @@ def _compose_service_blocks():
 
 def test_compose_healthchecks_present():
     blocks = _compose_service_blocks()
-    for svc in ("backend", "worker", "beat", "frontend"):
+    for svc in ("backend", "worker-fast", "worker-slow", "beat", "frontend"):
         assert "healthcheck:" in blocks[svc], f"{svc} has no healthcheck"
     assert "/health" in blocks["backend"]
-    assert "inspect ping" in blocks["worker"]  # proves the consumer is alive
+    # Each lane proves its own consumer is alive via its per-lane alive key —
+    # inspect ping flaps under the solo pool, so the healthcheck no longer
+    # uses it.
+    assert "own_lane_alive" in blocks["worker-fast"]
+    assert "own_lane_alive" in blocks["worker-slow"]
     assert "service_healthy" in blocks["nginx"]  # waits for healthy upstreams
 
 

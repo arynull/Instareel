@@ -20,18 +20,35 @@ def fire_time_with_jitter(jitter_setting: object) -> dt.datetime:
     (unparseable/negative → default 5 / clamp 0). Jitter only delays: a
     negative jitter would set scheduled_for in the past, breaking the
     upcoming countdown and the slot's fire-time ordering for no benefit.
+
+    Anti-detection note: the jitter is applied at *second* resolution, not
+    whole minutes. Whole-minute fire times (06:00:00, 06:03:00, …) are a
+    bot fingerprint — real users post at 06:03:27. Two rules firing in the
+    same minute also naturally spread apart instead of landing on the same
+    second.
     """
     try:
         jitter = max(0, int(jitter_setting if jitter_setting is not None else 5))
     except (TypeError, ValueError):
         jitter = 5
-    return dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=random.randint(0, jitter))
+    return dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+        seconds=random.randint(0, jitter * 60)
+    )
 
 
 @celery.task(name="tasks.post_tasks.check_and_post", bind=True, max_retries=0)
 def check_and_post(self):
-    """Beat entry: create scheduled posts from due rule slots, then fire due posts."""
-    from sqlalchemy import select
+    """Beat entry: create scheduled posts from due rule slots, then fire due posts.
+
+    Fresh posts are handed to the slow lane immediately via Celery ETA
+    (countdown): the jittered fire time has *second* resolution, and the
+    per-minute tick could only dispatch at minute granularity — ETA preserves
+    the exact second. The row is stamped dispatched_at at creation so the
+    tick's backstop below skips it; the atomic UPDATE ... WHERE there is the
+    safety net for manual/API posts and lost ETA publishes, and it can never
+    stamp the same row twice (no duplicate queue entries while a post waits
+    in the slow queue).
+    """
     from sqlalchemy.exc import IntegrityError
 
     from app.database import SyncSessionLocal
@@ -72,6 +89,33 @@ def check_and_post(self):
                     link="/dashboard/schedule",
                     dedup_key=f"slot_skip:{rule.id}:{slot_utc:%Y%m%d%H%M}",
                 )
+
+            def _dispatch_eta(post_id: int, when: dt.datetime):
+                """Hand a fresh post to the slow lane at its jittered second.
+
+                Celery ETA (countdown) preserves the second-resolution
+                jitter — a .delay() here would leave the post for the tick's
+                backstop and round the fire time up to the next minute tick.
+                The row was stamped dispatched_at at creation so the backstop
+                skips it; if the broker publish fails, the stamp is cleared
+                and the next tick retries within a minute.
+                """
+                delay_s = max(
+                    0.0,
+                    (when - dt.datetime.now(dt.timezone.utc)).total_seconds(),
+                )
+                try:
+                    execute_post.apply_async(args=[post_id], countdown=delay_s)
+                except Exception:  # noqa: BLE001 — broker hiccup, tick retries
+                    log.exception(
+                        "ETA dispatch failed for post %s — tick backstop will retry",
+                        post_id,
+                    )
+                    with SyncSessionLocal() as s2:
+                        p = s2.get(Post, post_id)
+                        if p is not None and p.status == PostStatus.scheduled:
+                            p.dispatched_at = None
+                            s2.commit()
 
             for rule, slot_utc in slots:
                 if sched.slot_already_fired(s, rule, slot_utc):
@@ -142,21 +186,25 @@ def check_and_post(self):
                 )
                 # Fire-time jitter comes from Settings (post_jitter_minutes),
                 # not a hardcoded constant — the toggle actually does something.
+                now = dt.datetime.now(dt.timezone.utc)
                 when = fire_time_with_jitter(sched.get_setting(s, "post_jitter_minutes", "5"))
-                s.add(
-                    Post(
-                        video_id=video.id,
-                        account_id=account.id,
-                        caption=caption,
-                        hashtags=tags,
-                        status=PostStatus.scheduled,
-                        scheduled_for=when,
-                        slot_for=slot_utc,
-                        is_trial=bool(video.is_trial),
-                    )
+                post = Post(
+                    video_id=video.id,
+                    account_id=account.id,
+                    caption=caption,
+                    hashtags=tags,
+                    status=PostStatus.scheduled,
+                    scheduled_for=when,
+                    slot_for=slot_utc,
+                    # ETA-dispatched just below: the tick backstop must
+                    # skip this row (it only stamps unstamped/stale rows).
+                    dispatched_at=now,
+                    is_trial=bool(video.is_trial),
                 )
+                s.add(post)
                 try:
                     s.flush()  # make the reservation visible to later rules in this tick
+                    post_id = post.id  # capture before commit (expire_on_commit)
                     s.commit()  # per-rule commit: one bad rule can't void the whole tick
                 except IntegrityError:
                     # Lost a race with a concurrent tick on the same slot —
@@ -169,6 +217,7 @@ def check_and_post(self):
                         "by a concurrent tick — skipping",
                     )
                     continue
+                _dispatch_eta(post_id, when)
                 if rule.pinned_video_id:
                     # One-shot fired: retire so tomorrow's tick doesn't re-post.
                     rule.is_active = False
@@ -193,13 +242,41 @@ def check_and_post(self):
                         link="/dashboard/posts",
                     )
 
-            now = dt.datetime.now(dt.timezone.utc)
-            due = (
-                s.execute(
-                    select(Post).where(Post.status == PostStatus.scheduled, Post.scheduled_for <= now)
+            # Backstop dispatch: due posts this tick didn't ETA-dispatch itself
+            # (manual/API posts, or an ETA publish that failed and aged past
+            # the stale window). The UPDATE ... WHERE is atomic: two ticks
+            # racing can never stamp the same row twice, so a post waiting in
+            # the slow queue is never enqueued a second time. A stale stamp
+            # means the dispatch was lost (broker/queue hiccup) — re-dispatch
+            # rather than lose the post; execute_post's atomic claim makes
+            # the loser of any residual race a harmless no-op.
+            from sqlalchemy import or_, update
+
+            try:
+                stale_minutes = max(
+                    1, int(sched.get_setting(s, "dispatch_stale_minutes", "30"))
                 )
-            ).scalars().all()
-            due_ids = [p.id for p in due]
+            except (TypeError, ValueError):
+                stale_minutes = 30
+            now = dt.datetime.now(dt.timezone.utc)
+            stale_cutoff = now - dt.timedelta(minutes=stale_minutes)
+            due_ids = [
+                r[0]
+                for r in s.execute(
+                    update(Post)
+                    .where(
+                        Post.status == PostStatus.scheduled,
+                        Post.scheduled_for <= now,
+                        or_(
+                            Post.dispatched_at.is_(None),
+                            Post.dispatched_at < stale_cutoff,
+                        ),
+                    )
+                    .values(dispatched_at=now)
+                    .returning(Post.id)
+                ).all()
+            ]
+            s.commit()
             slots_matched = len(slots)
         for pid in due_ids:
             execute_post.delay(pid)
@@ -241,6 +318,33 @@ def execute_post(self, post_id: int):
         publish_sync("post_status_update", {"post_id": post_id, "status": status.value})
         return True
 
+    def _rotate_proxy_for_cooldown(s, account) -> str:
+        """Move the account to a spare proxy (country-stable when possible).
+
+        Throttling and action blocks are usually IP-flavored: retrying from
+        the same flagged egress IP just burns the next posts. Returns a
+        human note for the log line.
+        """
+        own = s.get(Proxy, account.proxy_id) if account.proxy_id else None
+        spare = sched.pick_spare_proxy(
+            s,
+            exclude_id=account.proxy_id,
+            prefer_country=own.country if own else None,
+        )
+        if spare is not None and spare.id != account.proxy_id:
+            account.proxy_id = spare.id
+            return " — rotated proxy"
+        return " — no spare proxy"
+
+    def action_block_cooldown_hours(s) -> int:
+        """Cooldown after an Instagram action block (setting, default 24h)."""
+        from app.tasks.sync_helpers import get_setting
+
+        try:
+            return max(1, int(get_setting(s, "action_block_cooldown_hours", "24")))
+        except (TypeError, ValueError):
+            return 24
+
     def touch_account(ok: bool, err: str = ""):
         with SyncSessionLocal() as s:
             post = s.get(Post, post_id)
@@ -264,19 +368,19 @@ def execute_post(self, post_id: int):
                     hours = throttle_cooldown_hours(post.retry_count if post else 0)
                     account.status = AccountStatus.cooldown
                     account.cooldown_until = now + dt.timedelta(hours=hours)
-                    # Throttling is usually IP-based: move to a spare proxy so
-                    # the retry doesn't hammer the same flagged egress IP.
-                    own = s.get(Proxy, account.proxy_id) if account.proxy_id else None
-                    spare = sched.pick_spare_proxy(
-                        s,
-                        exclude_id=account.proxy_id,
-                        prefer_country=own.country if own else None,
+                    note = f"{_rotate_proxy_for_cooldown(s, account)}, cooldown {hours}h"
+                elif kind == "action_blocked":
+                    # Instagram action block (feedback_required): temporary,
+                    # lifts on its own — cool down instead of demanding a
+                    # manual session refresh (challenge_required would be
+                    # wrong here). Not retried: it won't clear in minutes.
+                    hours = action_block_cooldown_hours(s)
+                    account.status = AccountStatus.cooldown
+                    account.cooldown_until = now + dt.timedelta(hours=hours)
+                    note = (
+                        f"{_rotate_proxy_for_cooldown(s, account)}, "
+                        f"action-block cooldown {hours}h"
                     )
-                    if spare is not None and spare.id != account.proxy_id:
-                        account.proxy_id = spare.id
-                        note = f" — rotated proxy, cooldown {hours}h"
-                    else:
-                        note = f" — no spare proxy, cooldown {hours}h"
                 else:
                     # Any other repeated failure (auth, proxy, IG 500s):
                     # the Health Guard parks the account after a streak
@@ -288,11 +392,20 @@ def execute_post(self, post_id: int):
                         note = " — auto-parked 6h after 5 consecutive failures"
             username = account.username
             account_id = account.id
-            status_changed = kind in ("challenge", "throttled", "auto_park")
+            status_changed = kind in ("challenge", "throttled", "action_blocked", "auto_park")
             new_status = account.status
             s.commit()
             if note:
-                log_event_sync("WARNING", "account", f"Account @{username} throttled{note}")
+                if kind == "action_blocked":
+                    log_event_sync(
+                        "WARNING", "account", f"Account @{username} action-blocked{note}"
+                    )
+                elif kind == "auto_park":
+                    log_event_sync("WARNING", "account", f"Account @{username}{note}")
+                else:
+                    log_event_sync(
+                        "WARNING", "account", f"Account @{username} throttled{note}"
+                    )
             if status_changed:
                 publish_sync("account_status_change",
                              {"account_id": account_id, "status": new_status.value})
@@ -433,13 +546,32 @@ def execute_post(self, post_id: int):
             )
             if set_status(PostStatus.failed, fail_reason=fail_note[:2000], retry_count=retries + 1):
                 log_event_sync("ERROR", "post", f"Post {post_id} to @{username} failed: {fail_note}")
-                notify_sync(
-                    "post_failed",
-                    "critical",
-                    f"Post to @{username} failed",
-                    fail_note[:500],
-                    link="/dashboard/posts",
-                )
+                if kind == "action_blocked":
+                    # Dedicated warning instead of the generic post_failed
+                    # critical: the post failed because Instagram restricted
+                    # the account (already cooling down with a rotated proxy)
+                    # — the admin needs context, not a second alarm for the
+                    # same event.
+                    day = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+                    notify_sync(
+                        "action_blocked",
+                        "warning",
+                        f"@{username}: Instagram action block",
+                        f"Instagram temporarily blocked actions for @{username} "
+                        "(feedback_required). The account is cooling down and its "
+                        "proxy was rotated — no manual session refresh needed; "
+                        "posting resumes automatically.",
+                        link="/dashboard/accounts",
+                        dedup_key=f"action_block:{username}:{day}",
+                    )
+                else:
+                    notify_sync(
+                        "post_failed",
+                        "critical",
+                        f"Post to @{username} failed",
+                        fail_note[:500],
+                        link="/dashboard/posts",
+                    )
                 return {"post_id": post_id, "status": "failed", "error": error}
             # Lost a race with the stale-posting reaper — it already failed
             # the row and notified; don't double-notify or touch the account.

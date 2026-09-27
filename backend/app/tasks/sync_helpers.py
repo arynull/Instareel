@@ -147,6 +147,7 @@ def notify_sync(
     message: str,
     link: str | None = None,
     dedup_key: str | None = None,
+    session=None,
 ) -> int | None:
     """Create a dashboard notification (commit included).
 
@@ -155,6 +156,12 @@ def notify_sync(
     user reads it (or the watchdog auto-resolves it), the condition may
     notify again. Never raises: a notification must not break the task that
     triggered it.
+
+    When ``session`` is given, the row is added to that session and flushed
+    (not committed) — the caller owns the transaction. This matters when the
+    caller just marked a same-key notification read in its own session: with
+    a separate connection the dedup check would still see it as unread and
+    wrongly swallow the fresh alert.
     """
     from app.database import SyncSessionLocal
     from app.models import Notification, NotificationSeverity
@@ -163,32 +170,45 @@ def notify_sync(
         sev = NotificationSeverity(severity)
     except ValueError:
         sev = NotificationSeverity.INFO
-    try:
-        with SyncSessionLocal() as session:
-            if dedup_key:
-                existing = (
-                    session.execute(
-                        select(Notification)
-                        .where(
-                            Notification.dedup_key == dedup_key,
-                            Notification.read_at.is_(None),
-                        )
-                        .limit(1)
+
+    def _create(s):
+        if dedup_key:
+            existing = (
+                s.execute(
+                    select(Notification)
+                    .where(
+                        Notification.dedup_key == dedup_key,
+                        Notification.read_at.is_(None),
                     )
-                    .scalars()
-                    .first()
+                    .limit(1)
                 )
-                if existing is not None:
-                    return existing.id
-            n = Notification(
-                ntype=ntype,
-                severity=sev,
-                title=title,
-                message=message,
-                link=link,
-                dedup_key=dedup_key,
+                .scalars()
+                .first()
             )
-            session.add(n)
+            if existing is not None:
+                return existing.id
+        n = Notification(
+            ntype=ntype,
+            severity=sev,
+            title=title,
+            message=message,
+            link=link,
+            dedup_key=dedup_key,
+        )
+        s.add(n)
+        return n
+
+    try:
+        if session is not None:
+            n = _create(session)
+            if isinstance(n, int):
+                return n  # dedup hit: existing unread notification id
+            session.flush()  # populate n.id; caller owns the commit
+            return n.id
+        with SyncSessionLocal() as session:
+            n = _create(session)
+            if isinstance(n, int):
+                return n
             session.commit()
             session.refresh(n)
             return n.id

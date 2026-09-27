@@ -92,6 +92,12 @@ class Post(Base, TimestampMixin):
     # wall-clock minute in SCHEDULE_TZ. NULL for manual/API posts.
     # Powers the grace-window dedup: one slot → at most one post row.
     slot_for: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When this post was handed to the slow lane (execute_post dispatched).
+    # Powers the dispatch dedup: the per-minute tick atomically stamps only
+    # unstamped rows, so a post waiting in the slow queue is never enqueued
+    # twice. A stale stamp (older than dispatch_stale_minutes) means the
+    # dispatch was lost (broker/queue hiccup) and the tick re-dispatches.
+    dispatched_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     views_24h: Mapped[int | None] = mapped_column(Integer, nullable=True)
     views_7d: Mapped[int | None] = mapped_column(Integer, nullable=True)
