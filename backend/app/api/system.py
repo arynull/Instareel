@@ -499,7 +499,7 @@ _pending_auth: dict[str, int] = {}
 def _ws_client_ip(websocket: WebSocket) -> str:
     # Behind nginx, uvicorn's --proxy-headers middleware resolves
     # websocket.client from X-Forwarded-For, taking the rightmost
-    # *untrusted* entry. FORWARDED_ALLOW_IPS names the compose subnet (not
+    # *untrusted* entry. TRUSTED_PROXY_CIDR names the compose subnet (not
     # '*'), so a client-supplied XFF can't spoof this — the entry nginx
     # appended is the one that counts.
     return websocket.client.host if websocket.client else "unknown"
