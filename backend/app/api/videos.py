@@ -61,7 +61,7 @@ def _post_out(p: Post, audio_track: str | None = None) -> PostOut:
 async def list_videos(
     status: str | None = Query(default=None),
     search: str | None = Query(default=None),
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, ge=1, le=200),
     _: str = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -477,7 +477,7 @@ posts_router = APIRouter()
 async def list_posts(
     status: str | None = Query(default=None),
     account_id: int | None = Query(default=None),
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, ge=1, le=200),
     _: str = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):

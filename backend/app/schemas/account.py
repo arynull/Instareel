@@ -1,7 +1,23 @@
 """Pydantic schemas shared across resources."""
 import datetime as dt
+import re
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Instagram usernames: 1-30 chars, letters/digits/period/underscore only.
+# Validated at creation so a typo ("my page", "@user") fails fast with a
+# clear 422 instead of creating an account that can never log in.
+_IG_USERNAME_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
+
+
+def validate_ig_username(v: str) -> str:
+    v = v.strip()
+    if not _IG_USERNAME_RE.match(v):
+        raise ValueError(
+            "Instagram usernames are 1-30 chars: letters, numbers, periods, "
+            "underscores only (no @, no spaces)"
+        )
+    return v
 
 
 class AccountCreate(BaseModel):
@@ -10,6 +26,11 @@ class AccountCreate(BaseModel):
     proxy_id: int | None = None
     max_daily_posts: int = Field(default=3, ge=1, le=20)
     notes: str | None = None
+
+    @field_validator("username")
+    @classmethod
+    def _username_charset(cls, v: str) -> str:
+        return validate_ig_username(v)
 
 
 class AccountUpdate(BaseModel):

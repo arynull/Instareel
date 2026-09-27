@@ -114,7 +114,7 @@ async def update_rule(rule_id: int, body: ScheduleRuleIn, _: str = Depends(get_c
         raise HTTPException(404, "Caption template not found")
     if body.pinned_video_id is not None:
         await _validate_pin(db, body.pinned_video_id, exclude_rule_id=rule_id)
-    for k, v in body.model_dump().items():
+    for k, v in body.model_dump(exclude_unset=True).items():
         setattr(r, k, v)
     await db.commit()
     await db.refresh(r)
@@ -229,7 +229,7 @@ async def update_caption(cid: int, body: CaptionIn, _: str = Depends(get_current
     c = await db.get(CaptionTemplate, cid)
     if not c:
         raise HTTPException(404, "Caption not found")
-    for k, v in body.model_dump().items():
+    for k, v in body.model_dump(exclude_unset=True).items():
         setattr(c, k, v)
     await db.commit()
     await db.refresh(c)
@@ -297,7 +297,7 @@ async def update_tags(hid: int, body: HashtagSetIn, _: str = Depends(get_current
     h = await db.get(HashtagSet, hid)
     if not h:
         raise HTTPException(404, "Hashtag set not found")
-    for k, v in body.model_dump().items():
+    for k, v in body.model_dump(exclude_unset=True).items():
         setattr(h, k, v)
     await db.commit()
     await db.refresh(h)

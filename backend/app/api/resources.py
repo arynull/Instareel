@@ -905,7 +905,7 @@ async def update_effect(eid: int, body: EffectIn, _: str = Depends(get_current_a
     e = await db.get(EffectPreset, eid)
     if not e:
         raise HTTPException(404, "Effect not found")
-    for k, v in body.model_dump().items():
+    for k, v in body.model_dump(exclude_unset=True).items():
         setattr(e, k, v)
     await db.commit()
     await db.refresh(e)

@@ -91,7 +91,9 @@ async def update_source(sid: int, body: SourceUpdate, _: str = Depends(get_curre
         raise HTTPException(409, "Stop the source before changing its settings")
     if body.account_id is not None and await db.get(Account, body.account_id) is None:
         raise HTTPException(404, "Download account not found")
-    for k, v in body.model_dump().items():
+    # exclude_unset: a partial body must not clobber untouched fields with
+    # schema defaults (e.g. {"max_items": 50} used to reset reels_only=True).
+    for k, v in body.model_dump(exclude_unset=True).items():
         setattr(r, k, v)
     await db.commit()
     await db.refresh(r)

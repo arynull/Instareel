@@ -341,7 +341,7 @@ async def list_logs(
     level: str | None = Query(default=None),
     category: str | None = Query(default=None),
     search: str | None = Query(default=None),
-    limit: int = Query(default=100, le=500),
+    limit: int = Query(default=100, ge=1, le=500),
     _: str = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
