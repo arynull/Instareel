@@ -70,32 +70,40 @@ NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 
 ## Database
 
-Alembic migrations `0001_initial` → `0002_audio_tracks` → `0003_bio_profile`
-cover the whole schema — always run `alembic upgrade head` after pulling.
+Alembic migrations `0001_initial` → … → `0017_notifications` cover the whole
+schema — always run `alembic upgrade head` after pulling.
 Models live in `backend/app/models/`; secrets (IG passwords, proxy passwords)
 are Fernet-encrypted at rest — set a persistent `FERNET_KEY` in `.env`
 (changing it later makes stored credentials unreadable).
 
 ## Backup & restore
 
-`/data` (SQLite DB, media, IG sessions) is a host bind mount. Back it up daily:
+The database (`./data/app.db` → `/data/app.db`) and all media (`./media/`
+→ `/data/media`, including IG session files under `./media/sessions/`) are
+host bind mounts. Back them up daily:
 
 ```bash
 ./scripts/backup.sh            # -> ./data/backups/instareel-YYYYMMDD-HHMMSS.tar.gz
 ```
 
 The script snapshots SQLite through the online backup API (consistent even
-while the worker is writing), tars the snapshot with `media/` and
-`sessions/`, and keeps the last 7 backups (`BACKUP_KEEP=14` to change).
+while the worker is writing), tars the snapshot with the whole `./media`
+tree, and keeps the last 7 backups (`BACKUP_KEEP=14` to change).
 Install as a host cron:
 
 ```cron
 0 3 * * * /path/to/Instareel/scripts/backup.sh >> /var/log/instareel-backup.log 2>&1
 ```
 
-Restore: `docker compose down`, extract the tarball to a temp dir, then copy
-`app-<stamp>.db` over `./data/app.db` and merge `media/` + `sessions/` back
-into `./data/`, then `docker compose up -d`.
+Restore:
+
+```bash
+docker compose down
+mkdir -p /tmp/ir-restore && tar -xzf data/backups/instareel-<stamp>.tar.gz -C /tmp/ir-restore
+cp /tmp/ir-restore/app-<stamp>.db data/app.db
+cp -a /tmp/ir-restore/media/. media/
+docker compose up -d
+```
 
 ## Troubleshooting
 
