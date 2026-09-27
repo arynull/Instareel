@@ -275,6 +275,27 @@ def test_api_list_shape_and_unread_count(api_client):
     assert set(body.keys()) == {"notifications", "unread_count", "upcoming"}
 
 
+def test_api_created_at_carries_utc_offset(api_client):
+    """SQLite reads CURRENT_TIMESTAMP back naive; the API must still emit an
+    explicit UTC offset so browsers don't parse it as local time (which
+    shifted every timestamp by the server/browser offset)."""
+    from app.models import NotificationSeverity
+
+    c, maker = api_client
+    _seed_async(
+        maker,
+        Notification(ntype="a", severity=NotificationSeverity.INFO, title="t", message="m"),
+    )
+    body = c.get("/api/v1/notifications").json()
+    created_at = body["notifications"][0]["created_at"]
+    assert created_at is not None
+    parsed = dt.datetime.fromisoformat(created_at)
+    assert parsed.tzinfo is not None, f"missing offset: {created_at}"
+    # The instant must be ~now, not hours off (the reported bug).
+    skew = abs((dt.datetime.now(dt.timezone.utc) - parsed).total_seconds())
+    assert skew < 300, f"timestamp skewed by {skew}s: {created_at}"
+
+
 def test_api_upcoming_lists_active_rules(api_client):
     c, maker = api_client
     _seed_async(maker, ScheduleRule(name="Sat 21:00", day_of_week=5, hour=21, minute=0, is_active=True))

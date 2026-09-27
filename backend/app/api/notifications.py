@@ -16,7 +16,22 @@ notifications_router = APIRouter()
 UPCOMING_LIMIT = 8
 
 
+def _as_utc_aware(value: dt.datetime | None) -> dt.datetime | None:
+    """Attach UTC to naive datetimes before serializing.
+
+    SQLite stores CURRENT_TIMESTAMP as UTC but reads it back naive; without
+    an explicit offset browsers parse it as *local* time, shifting every
+    displayed timestamp by the server/browser offset.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value
+
+
 def _notification_out(n: Notification) -> dict:
+    created = _as_utc_aware(n.created_at)
     return {
         "id": n.id,
         "type": n.ntype,
@@ -25,7 +40,7 @@ def _notification_out(n: Notification) -> dict:
         "message": n.message,
         "link": n.link,
         "read": n.read_at is not None,
-        "created_at": n.created_at.isoformat() if n.created_at else None,
+        "created_at": created.isoformat() if created else None,
     }
 
 

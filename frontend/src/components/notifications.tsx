@@ -36,9 +36,27 @@ const SEVERITY = {
   critical: { Icon: AlertOctagon, dot: "bg-red-500", text: "text-red-500" },
 } as const;
 
+function parseInstant(iso: string): number {
+  // A timestamp without an offset is UTC (the API guarantees an offset now;
+  // this is defense-in-depth so a naive string is never read as local time).
+  const zoned = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`;
+  return new Date(zoned).getTime();
+}
+
+function absoluteTime(iso: string | null): string {
+  if (!iso) return "";
+  return new Date(parseInstant(iso)).toLocaleString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function timeAgo(iso: string | null): string {
   if (!iso) return "";
-  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  const s = Math.max(0, (Date.now() - parseInstant(iso)) / 1000);
   if (s < 60) return "just now";
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
@@ -168,7 +186,10 @@ export function NotificationBell() {
                                 )}
                               </div>
                               <p className="mt-0.5 line-clamp-2 text-xs text-zinc-500">{n.message}</p>
-                              <span className="mt-1 block text-[11px] text-zinc-400">
+                              <span
+                                className="mt-1 block text-[11px] text-zinc-400"
+                                title={absoluteTime(n.created_at)}
+                              >
                                 {timeAgo(n.created_at)}
                               </span>
                             </div>
