@@ -32,6 +32,21 @@ from app.models import (
 from app.core.security import encrypt_secret
 
 
+def _run(coro):
+    """run_until_complete robust to pytest-asyncio unsetting/closing the
+    main-thread loop after async tests in earlier modules. Reuses the
+    existing loop when usable (same semantics as the old
+    asyncio.get_event_loop().run_until_complete), else makes a fresh one."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
+
 @pytest.fixture()
 def pragma_factory(tmp_path):
     """Sync session factory on a file DB with the production pragmas."""
@@ -85,7 +100,7 @@ def client(tmp_path, monkeypatch):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    asyncio.get_event_loop().run_until_complete(_create())
+    _run(_create())
     app.dependency_overrides[get_current_admin] = lambda: "admin"
     app.dependency_overrides[get_db] = override_db
     with TestClient(app) as c:
@@ -119,7 +134,7 @@ def test_account_delete_cascades_rules_sources_items(client):
             await s.commit()
             return acc.id
 
-    aid = asyncio.get_event_loop().run_until_complete(seed())
+    aid = _run(seed())
     r = c.delete(f"/api/v1/accounts/{aid}")
     assert r.status_code == 204, r.text
 
@@ -143,7 +158,7 @@ def test_account_delete_cascades_rules_sources_items(client):
             ).scalar()
             assert n_items == 0, "source items not cascaded"
 
-    asyncio.get_event_loop().run_until_complete(check())
+    _run(check())
 
 
 def test_delete_proxy_detaches_accounts(client):
@@ -158,7 +173,7 @@ def test_delete_proxy_detaches_accounts(client):
             await s.commit()
             return p.id, acc.id
 
-    pid, aid = asyncio.get_event_loop().run_until_complete(seed())
+    pid, aid = _run(seed())
     assert c.delete(f"/api/v1/proxies/{pid}").status_code == 204
 
     async def check():
@@ -166,7 +181,7 @@ def test_delete_proxy_detaches_accounts(client):
             acc = await s.get(Account, aid)
             assert acc.proxy_id is None
 
-    asyncio.get_event_loop().run_until_complete(check())
+    _run(check())
 
 
 def test_delete_caption_detaches_rules(client):
@@ -185,7 +200,7 @@ def test_delete_caption_detaches_rules(client):
             await s.commit()
             return t.id
 
-    cid = asyncio.get_event_loop().run_until_complete(seed())
+    cid = _run(seed())
     assert c.delete(f"/api/v1/captions/{cid}").status_code == 204
 
     async def check():
@@ -197,7 +212,7 @@ def test_delete_caption_detaches_rules(client):
             ).scalar_one()
             assert rule.caption_template_id is None
 
-    asyncio.get_event_loop().run_until_complete(check())
+    _run(check())
 
 
 def test_delete_video_clears_pinned_rules(client):
@@ -216,7 +231,7 @@ def test_delete_video_clears_pinned_rules(client):
             await s.commit()
             return v.id
 
-    vid = asyncio.get_event_loop().run_until_complete(seed())
+    vid = _run(seed())
     assert c.delete(f"/api/v1/videos/{vid}").status_code == 204
 
     async def check():
@@ -231,4 +246,4 @@ def test_delete_video_clears_pinned_rules(client):
             assert rule.is_active is False
             assert rule.pinned_video_id is None
 
-    asyncio.get_event_loop().run_until_complete(check())
+    _run(check())

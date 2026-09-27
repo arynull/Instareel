@@ -7,6 +7,7 @@ proxy test), websocket/redis paths.
 import io
 import os
 import wave
+import asyncio
 
 import pytest
 from fastapi.testclient import TestClient
@@ -35,6 +36,22 @@ from app.models import (
 )
 
 
+
+def _run(coro):
+    """run_until_complete robust to pytest-asyncio unsetting/closing the
+    main-thread loop after async tests in earlier modules. Reuses the
+    existing loop when usable (same semantics as the old
+    asyncio.get_event_loop().run_until_complete), else makes a fresh one."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/t.db")
@@ -50,7 +67,7 @@ def client(tmp_path, monkeypatch):
 
     import asyncio
 
-    asyncio.get_event_loop().run_until_complete(_create())
+    _run(_create())
     monkeypatch.setattr(settings, "MEDIA_ROOT", str(tmp_path / "media"))
     monkeypatch.setattr(settings, "AUTO_PROCESS_ON_UPLOAD", False)
     app.dependency_overrides[get_current_admin] = lambda: "admin"
@@ -319,7 +336,7 @@ class TestVideos:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(seed())
+        _run(seed())
         acc = c.get("/api/v1/accounts").json()[0]["id"]
         vids = c.get("/api/v1/videos").json()
         vid = vids[0]["id"]
@@ -343,7 +360,7 @@ class TestPosts:
 
         import asyncio
 
-        acc_id, vid_id = asyncio.get_event_loop().run_until_complete(seed())
+        acc_id, vid_id = _run(seed())
         r = c.post("/api/v1/posts/schedule",
                    json={"video_id": vid_id, "account_id": acc_id, "caption": "hi", "hashtags": "#a"})
         assert r.status_code == 201, r.text
@@ -372,7 +389,7 @@ class TestPosts:
 
         import asyncio
 
-        acc_id, vid_id = asyncio.get_event_loop().run_until_complete(seed())
+        acc_id, vid_id = _run(seed())
         r = c.post("/api/v1/posts/schedule", json={"video_id": vid_id, "account_id": acc_id})
         assert r.status_code == 201, r.text
         # Source caption posts verbatim; no extra hashtag set is appended.
@@ -499,7 +516,7 @@ class TestResources:
                 x.proxy_id = px["id"]
                 await s.commit()
 
-        asyncio.get_event_loop().run_until_complete(link())
+        _run(link())
         # Partial PUT keeps the other sections intact.
         c.put(f"/api/v1/bios/{b1['id']}", json={"account_id": acc, "text": "hello"})
         row = c.get("/api/v1/bios").json()[0]
@@ -584,7 +601,7 @@ class TestResources:
                 x.proxy_id = man["id"]
                 await s.commit()
 
-        asyncio.get_event_loop().run_until_complete(seed())
+        _run(seed())
         r = c.post("/api/v1/proxies/reset")
         assert r.status_code == 200, r.text
         assert r.json() == {"deleted_auto": 1, "reset_manual": 1, "unlinked_accounts": 1}
@@ -599,7 +616,7 @@ class TestResources:
                 assert (await s.get(Account, acc)).proxy_id is None
                 assert (await s.execute(select(Proxy))).scalars().all()[0].source == "manual"
 
-        asyncio.get_event_loop().run_until_complete(check())
+        _run(check())
 
     def test_rule_pin_flow(self, client):
         import asyncio
@@ -622,7 +639,7 @@ class TestResources:
                 vc = (await s.execute(select(Video).where(Video.md5_hash == "pinc"))).scalar_one()
                 return acc.id, va.id, vb.id, vc.id
 
-        acc, va, vb, vc = asyncio.get_event_loop().run_until_complete(seed())
+        acc, va, vb, vc = _run(seed())
         base = {"name": "pr", "hour": 10, "account_id": acc}
         assert c.post("/api/v1/schedule", json={**base, "pinned_video_id": 999999}).status_code == 404
         assert c.post("/api/v1/schedule", json={**base, "pinned_video_id": vb}).status_code == 422
@@ -649,10 +666,12 @@ class TestResources:
         assert c.post(f"/api/v1/schedule/{rid}/unpin").json()["pinned_video_id"] is None
         repin = c.post(f"/api/v1/schedule/{rid}/pin", json={"video_id": va}).json()
         assert repin["pinned_video_id"] == va and repin["is_active"] is True
-        # Deleting the video retires the pin (keeps the reference for display).
+        # Deleting the video retires the pin. The FK reference is nulled —
+        # FK enforcement forbids a dangling pin — and the retirement is
+        # recorded in the system log with the rule name.
         assert c.delete(f"/api/v1/videos/{va}").status_code == 204
         row = next(x for x in c.get("/api/v1/schedule").json() if x["id"] == rid)
-        assert row["is_active"] is False and row["pinned_video_id"] == va
+        assert row["is_active"] is False and row["pinned_video_id"] is None
         assert row["pinned_video_label"] is None
 
     def test_rules_captions_crud(self, client):
@@ -700,7 +719,7 @@ class TestResources:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(seed())
+        _run(seed())
         ov = c.get("/api/v1/analytics/overview?days=30").json()
         assert ov["total_posts"] == 1 and ov["total_views"] == 100
         assert c.get("/api/v1/analytics/overview?days=-5").status_code == 422
@@ -765,7 +784,7 @@ class TestResources:
 
         import asyncio
 
-        vid_id = asyncio.get_event_loop().run_until_complete(seed())
+        vid_id = _run(seed())
         r = c.delete(f"/api/v1/videos/{vid_id}")
         assert r.status_code == 409, r.text
         assert "post" in r.json()["detail"].lower()
@@ -957,7 +976,7 @@ class TestPostingPipeline:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(seed())
+        _run(seed())
         rows = {r["name"]: r for r in c.get("/api/v1/analytics/effects").json()}
         assert rows["fx_a"]["views"] == 10 and rows["fx_b"]["views"] == 90
         assert rows["fx_zero"]["posts"] == 0 and rows["fx_zero"]["views"] == 0
@@ -981,7 +1000,7 @@ class TestGuardianEndpoints:
 
         import asyncio
 
-        acc_id = asyncio.get_event_loop().run_until_complete(seed())
+        acc_id = _run(seed())
         r = c.get(f"/api/v1/accounts/{acc_id}/health")
         assert r.status_code == 200, r.text
         body = r.json()
@@ -1014,7 +1033,7 @@ class TestGuardianEndpoints:
 
         import asyncio
 
-        acc_id = asyncio.get_event_loop().run_until_complete(seed())
+        acc_id = _run(seed())
         r = c.get(f"/api/v1/analytics/best-slots?account_id={acc_id}")
         assert r.status_code == 200, r.text
         body = r.json()
@@ -1044,7 +1063,7 @@ class TestGuardianEndpoints:
 
         import asyncio
 
-        vid_id = asyncio.get_event_loop().run_until_complete(seed())
+        vid_id = _run(seed())
         r = c.get(f"/api/v1/videos/{vid_id}/score")
         assert r.status_code == 200, r.text
         body = r.json()
@@ -1072,7 +1091,7 @@ class TestGuardianEndpoints:
 
         import asyncio
 
-        vid_id = asyncio.get_event_loop().run_until_complete(seed())
+        vid_id = _run(seed())
         body = c.get(f"/api/v1/videos/{vid_id}/score").json()
         cap = next(b for b in body["breakdown"] if b["key"] == "caption")
         assert cap["points"] == 20, body
