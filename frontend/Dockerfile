@@ -1,7 +1,11 @@
 FROM node:20-alpine AS deps
 WORKDIR /app
-COPY package.json ./
-RUN npm install
+# Install the exact locked tree (npm ci), not a fresh registry resolve.
+# A floating `npm install` re-resolves on every build and can die on transient
+# registry metadata (npm arborist "Cannot read properties of null (reading
+# 'edgesOut')" crash seen 2026-09-28).
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 
 FROM node:20-alpine AS builder
 WORKDIR /app
