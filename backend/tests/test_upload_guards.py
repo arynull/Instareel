@@ -133,3 +133,83 @@ def test_video_upload_rejects_huge_declared_content_length(client):
         files={"file": ("x.mp4", b"tiny", "video/mp4")},
     )
     assert r.status_code == 413
+
+
+# ---- multipart Content-Length slack ----
+
+
+def test_allows_declared_body_within_multipart_slack():
+    # A file of exactly max_bytes has a body a few hundred bytes larger
+    # (boundaries + part headers) — that must not 413 at the pre-check.
+    from app.utils.uploads import _MULTIPART_OVERHEAD_SLACK
+
+    cap = 500 * 1024 * 1024
+    reject_oversize_content_length(
+        _request_with_content_length(str(cap + 1000)), cap, "File"
+    )
+    reject_oversize_content_length(
+        _request_with_content_length(str(cap + _MULTIPART_OVERHEAD_SLACK)), cap, "File"
+    )
+
+
+def test_rejects_declared_body_beyond_slack():
+    from app.utils.uploads import _MULTIPART_OVERHEAD_SLACK
+
+    cap = 500 * 1024 * 1024
+    with pytest.raises(HTTPException) as ei:
+        reject_oversize_content_length(
+            _request_with_content_length(str(cap + _MULTIPART_OVERHEAD_SLACK + 1)),
+            cap,
+            "File",
+        )
+    assert ei.value.status_code == 413
+
+
+# ---- bio picture: non-HTTP error mid-stream cleans up ----
+
+
+class _ExplodingWriter:
+    """aiofiles.open replacement whose write() raises mid-stream."""
+
+    def __init__(self, real_open, path, mode):
+        self._real_open = real_open
+        self._path = path
+        self._mode = mode
+
+    async def __aenter__(self):
+        self._fh = self._real_open(self._path, self._mode)
+        self._fh.__enter__()
+        return self
+
+    async def __aexit__(self, *a):
+        self._fh.__exit__(*a)
+        return False
+
+    async def write(self, data):
+        raise OSError("disk exploded")
+
+
+def test_bio_picture_disk_error_cleans_partial_file(client, tmp_path, monkeypatch):
+    import aiofiles
+
+    real_open = aiofiles.open
+    monkeypatch.setattr(
+        aiofiles, "open", lambda path, mode="r": _ExplodingWriter(real_open, path, mode)
+    )
+
+    # Create account + bio through the API surface.
+    r = client.post("/api/v1/accounts", json={"username": "u_pic", "password": "x" * 12})
+    assert r.status_code == 201, r.text[:200]
+    aid = r.json()["id"]
+    r = client.post("/api/v1/bios", json={"account_id": aid, "text": "t"})
+    assert r.status_code == 201, r.text[:200]
+    bid = r.json()["id"]
+
+    r = client.post(
+        f"/api/v1/bios/{bid}/picture",
+        files={"file": ("pic.png", b"\x89PNG" + b"x" * 100, "image/png")},
+    )
+    assert r.status_code == 400, r.text[:200]
+    pics_dir = tmp_path / "media" / "profile_pics"
+    leftovers = list(pics_dir.glob("bio_*")) if pics_dir.exists() else []
+    assert leftovers == []

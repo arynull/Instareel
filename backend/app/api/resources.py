@@ -252,6 +252,11 @@ async def upload_bio_picture(
         if os.path.exists(dest):
             os.remove(dest)
         raise
+    except Exception as exc:
+        # Disk error mid-stream etc. — never orphan the partial file.
+        if os.path.exists(dest):
+            os.remove(dest)
+        raise HTTPException(400, f"Upload failed: {exc}")
     finally:
         try:
             await file.close()

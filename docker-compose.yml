@@ -81,8 +81,11 @@ services:
     # --proxy-headers: trust X-Forwarded-For/Proto from nginx so slowapi
     # rate-limits see the real client IP (nginx sets the headers; the
     # backend port is not published, so only nginx can reach it directly).
-    # FORWARDED_ALLOW_IPS defaults to '*' — tighten it if you publish :8000.
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=${FORWARDED_ALLOW_IPS:-*}
+    # Trust the compose subnet (see bottom of this file), NOT '*': with '*'
+    # uvicorn takes the leftmost XFF entry, which the client controls, so a
+    # spoofed X-Forwarded-For would bypass rate limits and the /ws per-IP
+    # cap. Tighten further via FORWARDED_ALLOW_IPS in .env if needed.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=${FORWARDED_ALLOW_IPS:-172.28.0.0/16}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\""]
       interval: 30s
@@ -205,3 +208,19 @@ services:
 volumes:
   pgdata:
   redisdata:
+
+# Fixed-subnet bridge so FORWARDED_ALLOW_IPS can name the proxy network
+# instead of '*'. With '*' uvicorn's ProxyHeadersMiddleware takes the
+# LEFTMOST X-Forwarded-For entry, which the client controls — anyone could
+# spoof their IP and walk around slowapi rate limits and the /ws per-IP
+# pending-auth cap (nginx appends the real IP, but '*' reads the fake one).
+# Trusting only this subnet makes uvicorn resolve the rightmost *untrusted*
+# entry — the one nginx itself appended. Override FORWARDED_ALLOW_IPS in
+# .env if this subnet collides with your LAN/VPN.
+networks:
+  default:
+    name: instareel-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
