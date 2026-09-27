@@ -482,16 +482,53 @@ ws_router = APIRouter()
 #: 4401 and the client reconnects with a fresh token.
 WS_PING_INTERVAL = 25.0
 WS_PONG_TIMEOUT = 10.0
+#: How long the server waits for the auth frame after accepting the socket.
+WS_AUTH_TIMEOUT = 5.0
+#: Max simultaneous not-yet-authenticated sockets per client IP. Without a
+#: cap, an attacker can hold the accept->auth window open on many sockets at
+#: once (slowloris-style) and exhaust the server's connection budget — the
+#: handshake is cheap for them and expensive for us. Single uvicorn worker
+#: in production, so a process-local counter is exact (and still a bound
+#: with more workers: workers x cap).
+WS_MAX_PENDING_AUTH_PER_IP = 8
+
+#: client-ip -> sockets accepted but not yet authenticated.
+_pending_auth: dict[str, int] = {}
+
+
+def _ws_client_ip(websocket: WebSocket) -> str:
+    # Behind nginx --proxy-headers, starlette already resolves
+    # websocket.client from X-Forwarded-For.
+    return websocket.client.host if websocket.client else "unknown"
 
 
 @ws_router.websocket("/ws")
 async def ws_feed(websocket: WebSocket):
+    ip = _ws_client_ip(websocket)
+    pending = _pending_auth.get(ip, 0)
+    if pending >= WS_MAX_PENDING_AUTH_PER_IP:
+        # Deny during the handshake — never accept, so no unauthenticated
+        # socket (and no 5s auth window) is consumed.
+        await websocket.close(code=1013)
+        return
+    _pending_auth[ip] = pending + 1
+    try:
+        await _ws_feed_inner(websocket)
+    finally:
+        left = _pending_auth.get(ip, 1) - 1
+        if left <= 0:
+            _pending_auth.pop(ip, None)
+        else:
+            _pending_auth[ip] = left
+
+
+async def _ws_feed_inner(websocket: WebSocket):
     await websocket.accept()
     # Auth arrives as the first message frame ({ "token": ... }), never as a
     # URL query param (URLs are written to access logs).
     token = ""
     try:
-        raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT)
         token = (json.loads(raw) or {}).get("token", "")
     except Exception:
         token = ""

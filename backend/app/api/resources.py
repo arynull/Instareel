@@ -228,32 +228,53 @@ async def upload_bio_picture(
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in PIC_EXT:
         raise HTTPException(400, f"Unsupported image type {ext}. Allowed: {sorted(PIC_EXT)}")
-    raw = await file.read()
+    dirs = media_dirs()
+    tmp_name = f"bio_{bid}_{uuid.uuid4().hex}{ext}"
+    dest = os.path.join(dirs["profile_pics"], tmp_name)
+    # Stream to disk with a cap — the old `await file.read()` loaded the
+    # whole body into memory with no limit, so a huge upload OOM'd the
+    # backend before the 10MB check ever ran.
+    from app.utils.uploads import reject_oversize_content_length
+
+    reject_oversize_content_length(request, MAX_PIC_BYTES, "Image")
+    size = 0
     try:
-        await file.close()
-    except Exception:
-        pass
-    if not raw:
+        async with aiofiles.open(dest, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_PIC_BYTES:
+                    raise HTTPException(413, "Image exceeds 10MB")
+                await f.write(chunk)
+    except HTTPException:
+        if os.path.exists(dest):
+            os.remove(dest)
+        raise
+    finally:
+        try:
+            await file.close()
+        except Exception:
+            pass
+    if size == 0:
+        if os.path.exists(dest):
+            os.remove(dest)
         raise HTTPException(400, "Empty file")
-    if len(raw) > MAX_PIC_BYTES:
-        raise HTTPException(413, "Image exceeds 10MB")
     try:
         from PIL import Image as PILImage
 
-        with PILImage.open(__import__("io").BytesIO(raw)) as img:
+        with PILImage.open(dest) as img:
             img.load()
             if img.width < 50 or img.height < 50:
                 raise HTTPException(422, "Image too small (min 50×50)")
     except HTTPException:
+        os.remove(dest)
         raise
     except Exception:
+        os.remove(dest)
         raise HTTPException(422, "File is not a valid image")
-    dirs = media_dirs()
-    tmp_name = f"bio_{bid}_{uuid.uuid4().hex}{ext}"
-    dest = os.path.join(dirs["profile_pics"], tmp_name)
     old = b.profile_pic_path
-    with open(dest, "wb") as f:
-        f.write(raw)
     b.profile_pic_path = dest
     await db.commit()
     await db.refresh(b)
@@ -969,6 +990,9 @@ async def upload_audio(
     dirs = media_dirs()
     tmp_name = f"{uuid.uuid4().hex}{ext}"
     raw_path = os.path.join(dirs["audio"], tmp_name)
+    from app.utils.uploads import reject_oversize_content_length
+
+    reject_oversize_content_length(request, MAX_AUDIO_BYTES, "Audio")
     size = 0
     try:
         # Single streaming handle (same pattern as video upload) — one

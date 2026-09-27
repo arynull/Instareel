@@ -97,6 +97,11 @@ async def upload_video(
     size = 0
     h = hashlib.md5()
     max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    # Fail fast when the client declares a body over the cap (the streaming
+    # loop below still enforces it for chunked/lying bodies).
+    from app.utils.uploads import reject_oversize_content_length
+
+    reject_oversize_content_length(request, max_bytes, "File")
     try:
         # Stream straight to disk (constant memory, regardless of file size).
         async with aiofiles.open(raw_path, "wb") as f:
