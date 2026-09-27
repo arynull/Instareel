@@ -1,7 +1,7 @@
 """Schedule rules, captions, hashtags, bios, effects, logs, settings."""
 import datetime as dt
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 import enum
@@ -71,8 +71,11 @@ class BioConfig(Base, TimestampMixin):
 
 class EffectPreset(Base, TimestampMixin):
     __tablename__ = "effect_presets"
+    # Parity with migrations (0001): explicit unique index, not a column-level
+    # unique constraint — same name and enforcement on both schema paths.
+    __table_args__ = (Index("ix_effect_presets_name", "name", unique=True),)
 
-    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
     ffmpeg_filter: Mapped[str] = mapped_column(Text, default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -90,8 +93,11 @@ class AudioTrack(Base, TimestampMixin):
     """
 
     __tablename__ = "audio_tracks"
+    # Parity with migrations (0002): explicit unique index, not a column-level
+    # unique constraint — same name and enforcement on both schema paths.
+    __table_args__ = (Index("ix_audio_tracks_name", "name", unique=True),)
 
-    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
     file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     duration: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -113,8 +119,11 @@ class ProxySource(Base, TimestampMixin):
     """
 
     __tablename__ = "proxy_sources"
+    # Parity with migrations (0005): explicit unique index, not a column-level
+    # unique constraint — same name and enforcement on both schema paths.
+    __table_args__ = (Index("ix_proxy_sources_name", "name", unique=True),)
 
-    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
     url: Mapped[str] = mapped_column(String(1024), nullable=False)
     default_protocol: Mapped[str] = mapped_column(String(16), default="http")
     default_country: Mapped[str] = mapped_column(String(8), default="")
@@ -175,7 +184,9 @@ class Notification(Base, TimestampMixin):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     link: Mapped[str | None] = mapped_column(String(512), nullable=True)
     dedup_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
-    read_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    read_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True  # parity with 0017's ix_notifications_read_at
+    )
 
 
 class Setting(Base):
