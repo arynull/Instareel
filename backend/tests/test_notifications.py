@@ -146,7 +146,7 @@ def test_watchdog_gap_detection(factory, monkeypatch):
     assert _count(maker, ntype="scheduler_gap") == 1
 
 
-def test_watchdog_prunes_old_notifications(factory, monkeypatch):
+def test_watchdog_prunes_only_read_notifications(factory, monkeypatch):
     maker = factory
     ok = ("ok", "fine")
     _patch_checks(monkeypatch, {
@@ -154,11 +154,35 @@ def test_watchdog_prunes_old_notifications(factory, monkeypatch):
     })
     old = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=45)
     with maker() as s:
-        s.add(Notification(ntype="x", severity="info", title="old", message="old", created_at=old))
+        s.add(Notification(ntype="x", severity="info", title="old-read",
+                           message="old", created_at=old,
+                           read_at=old + dt.timedelta(days=1)))
+        s.add(Notification(ntype="y", severity="critical", title="old-unread",
+                           message="old", created_at=old))
         s.commit()
-    assert _count(maker) == 1
+    assert _count(maker) == 2
+    health_tasks.system_watchdog()
+    with maker() as s:
+        titles = sorted(n.title for n in s.query(Notification).all())
+    # The read one is pruned; the unread one is kept — the user never saw it.
+    assert titles == ["old-unread"]
+
+
+def test_watchdog_first_run_emits_nothing(factory, monkeypatch):
+    """First run only records baseline state: no gap alert (there is no
+    prior run to compare against) and no component alerts when all checks
+    are ok."""
+    maker = factory
+    ok = ("ok", "fine")
+    _patch_checks(monkeypatch, {
+        "database": ok, "redis": ok, "celery_worker": ok, "celery_beat": ok,
+    })
+    assert _count(maker) == 0
     health_tasks.system_watchdog()
     assert _count(maker) == 0
+    # ...but the baseline was recorded, so the next run is a real comparison.
+    with maker() as s:
+        assert s.get(Setting, "watchdog_last_run") is not None
 
 
 # ---- _next_fire ----

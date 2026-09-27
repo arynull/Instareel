@@ -89,7 +89,8 @@ def system_watchdog():
     busy" note is posted instead. Either way this is the complement of the
     posting grace window, which only covers brief outages.
 
-    Finally it prunes notifications older than NOTIFICATION_RETENTION_DAYS.
+    Finally it prunes read notifications older than NOTIFICATION_RETENTION_DAYS
+    (unread ones are kept — the user hasn't seen them yet).
     Never raises: monitoring must not break the worker.
     """
     import datetime as _dt
@@ -220,9 +221,18 @@ def system_watchdog():
                 )
 
         # --- retention prune ---
+        # Only notifications the user has already seen (read_at set) are
+        # pruned: deleting unread ones would silently drop alerts the user
+        # never saw — e.g. a critical "component down" from an outage
+        # month ago that nobody opened.
         with SyncSessionLocal() as session:
             cutoff = now - _dt.timedelta(days=NOTIFICATION_RETENTION_DAYS)
-            session.execute(delete(Notification).where(Notification.created_at < cutoff))
+            session.execute(
+                delete(Notification).where(
+                    Notification.created_at < cutoff,
+                    Notification.read_at.is_not(None),
+                )
+            )
             session.commit()
         log.info("system_watchdog ran (gap_minutes=%s)", gap_minutes)
     except Exception:  # noqa: BLE001 — monitoring must never break the worker
