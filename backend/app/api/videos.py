@@ -1,6 +1,7 @@
 """Video upload / processing / preview + post history endpoints."""
 import asyncio
 import hashlib
+import logging
 import os
 import uuid
 
@@ -19,6 +20,23 @@ from app.services.log_service import log_event
 from app.services.video_processor import media_dirs
 
 router = APIRouter()
+
+log = logging.getLogger("igfunnel.api.videos")
+
+
+async def _reject_if_live_processing(video_id: int, v) -> None:
+    """409 when a run is genuinely working on the video.
+
+    A *stale* ``processing`` status (previous run died after claiming; its
+    lock TTL expired) does NOT 409 — it falls through so the user can
+    retry, and the task reclaims the stale claim.
+    """
+    if v.status == VideoStatus.processing:
+        from app.tasks.video_tasks import process_lock_held
+
+        if process_lock_held(video_id):
+            raise HTTPException(409, "Already processing")
+        log.warning("Video %s: re-queueing over a stale processing claim", video_id)
 
 ALLOWED_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 UPLOAD_CHUNK = 4 * 1024 * 1024
@@ -242,8 +260,7 @@ async def trigger_process(request: Request, video_id: int, _: str = Depends(get_
     v = await db.get(Video, video_id)
     if not v:
         raise HTTPException(404, "Video not found")
-    if v.status == VideoStatus.processing:
-        raise HTTPException(409, "Already processing")
+    await _reject_if_live_processing(video_id, v)
     from app.tasks.video_tasks import process_video_task
 
     # Flip to processing NOW so the dashboard shows progress immediately
@@ -271,8 +288,7 @@ async def reprocess(request: Request, video_id: int, _: str = Depends(get_curren
     v = await db.get(Video, video_id)
     if not v:
         raise HTTPException(404, "Video not found")
-    if v.status == VideoStatus.processing:
-        raise HTTPException(409, "Already processing")
+    await _reject_if_live_processing(video_id, v)
     from app.tasks.video_tasks import process_video_task
 
     # Same immediate flip as trigger_process: the UI polls on status.
