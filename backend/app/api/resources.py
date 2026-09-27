@@ -683,12 +683,27 @@ async def list_sources(_: str = Depends(get_current_admin), db: AsyncSession = D
     return [_source_out(x) for x in rows]
 
 
+def _checked_source_url(url: str) -> None:
+    """Fail fast on unsafe proxy-list URLs (SSRF, m1).
+
+    The periodic fetch re-validates every hop anyway; rejecting here gives
+    the admin an immediate 400 instead of a source that errors forever.
+    """
+    from app.utils.ssrf import validate_fetch_url
+
+    try:
+        validate_fetch_url(url)
+    except ValueError as exc:
+        raise HTTPException(400, f"Source URL rejected: {exc}")
+
+
 @proxy_router.post("/sources", response_model=ProxySourceOut, status_code=201)
 async def create_source(body: ProxySourceIn, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     if body.default_protocol not in ("http", "https", "socks4", "socks5"):
         raise HTTPException(400, "Invalid default_protocol")
     if body.url and not body.url.lower().startswith(("http://", "https://")):
         raise HTTPException(400, "Source URL must be http(s)")
+    _checked_source_url(body.url)
     exists = (await db.execute(select(ProxySource).where(ProxySource.name == body.name))).scalar_one_or_none()
     if exists:
         raise HTTPException(409, "Source already exists")
@@ -709,6 +724,7 @@ async def update_source(sid: int, body: ProxySourceIn, _: str = Depends(get_curr
         raise HTTPException(404, "Source not found")
     if body.default_protocol not in ("http", "https", "socks4", "socks5"):
         raise HTTPException(400, "Invalid default_protocol")
+    _checked_source_url(body.url)
     clash = (await db.execute(
         select(ProxySource).where(ProxySource.name == body.name, ProxySource.id != sid)
     )).scalar_one_or_none()

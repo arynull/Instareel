@@ -257,7 +257,7 @@ def refresh_proxy_pool():
                     have.add(proxy_fingerprint(known["scheme"], known["host"], known["port"]))
         if not snap:
             return {"sources": 0}
-        import httpx
+        from app.utils.ssrf import fetch_url_guarded
 
         total_added = 0
         per_source = []
@@ -265,14 +265,10 @@ def refresh_proxy_pool():
             added = total = 0
             err = ""
             try:
-                if not url.lower().startswith(("http://", "https://")):
-                    raise ValueError("source URL must be http(s)")
-                with httpx.Client(timeout=30, follow_redirects=True) as client:
-                    resp = client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                    resp.raise_for_status()
-                    if len(resp.content) > 1024 * 1024:
-                        raise ValueError("list exceeds 1MB")
-                    lines = resp.text.splitlines()[:MAX_IMPORT_LINES]
+                # SSRF-guarded: scheme + public-IP validation on the URL and
+                # every redirect hop (m1).
+                _final_url, text = fetch_url_guarded(url, timeout=30, max_bytes=1024 * 1024)
+                lines = text.splitlines()[:MAX_IMPORT_LINES]
                 total = len(lines)
                 with SyncSessionLocal() as s:
                     made = 0
