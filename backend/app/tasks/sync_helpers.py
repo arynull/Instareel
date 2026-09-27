@@ -68,6 +68,45 @@ def log_event_sync(level: str, category: str, message: str, details: dict | None
         log.exception("Failed to persist system log")
 
 
+#: Setting key holding the SCHEDULE_TZ date (YYYY-MM-DD) of the last
+#: successful daily-counts reset.
+DAILY_RESET_DATE_KEY = "daily_counts_reset_date"
+
+
+def ensure_daily_counts_reset() -> bool:
+    """Zero Account.posts_today once per SCHEDULE_TZ day, with catch-up.
+
+    The beat entry fires at midnight, but if the worker/beat was down then,
+    the old code never reset — accounts stayed capped at max_daily_posts
+    indefinitely. The date stamp makes the reset idempotent: any caller
+    (the midnight task, or the per-minute scheduler as a backstop) performs
+    it exactly once per local day, catching up a missed midnight on the
+    next run. Returns True when it actually reset.
+    """
+    from sqlalchemy import update
+
+    from app.database import SyncSessionLocal
+    from app.models import Account, Setting
+
+    today = _schedule_now().date().isoformat()
+    try:
+        with SyncSessionLocal() as s:
+            row = s.get(Setting, DAILY_RESET_DATE_KEY)
+            if row is not None and row.value == today:
+                return False
+            s.execute(update(Account).values(posts_today=0))
+            if row is None:
+                s.add(Setting(key=DAILY_RESET_DATE_KEY, value=today, category="system"))
+            else:
+                row.value = today
+            s.commit()
+        log_event_sync("INFO", "system", f"Daily post counts reset ({today})")
+        return True
+    except Exception:  # noqa: BLE001
+        log.exception("ensure_daily_counts_reset failed")
+        return False
+
+
 # ---- User-facing notifications (dashboard bell) ----
 
 #: How long read notifications are kept before the watchdog prunes them.

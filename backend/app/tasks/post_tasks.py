@@ -25,6 +25,10 @@ def check_and_post(self):
     from app.tasks.sync_helpers import log_event_sync, notify_sync
 
     try:
+        # Backstop for a missed midnight reset_daily_counts: idempotent via
+        # the date stamp, so this is a no-op on every tick except the first
+        # one after a local day boundary (or after an outage).
+        sched.ensure_daily_counts_reset()
         with SyncSessionLocal() as s:
             # (rule, slot) pairs — a slot stays fireable for
             # SCHEDULE_GRACE_MINUTES after its minute, so a brief

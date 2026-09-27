@@ -373,18 +373,14 @@ def clean_old_media(days: int = 30):
 
 @celery.task(name="tasks.account_tasks.reset_daily_counts")
 def reset_daily_counts():
-    from sqlalchemy import update
-
-    from app.database import SyncSessionLocal
-    from app.models import Account
-    from app.tasks.sync_helpers import log_event_sync
+    # Idempotent via the date stamp in ensure_daily_counts_reset: safe to
+    # run on any schedule, and a missed midnight is caught up by the
+    # per-minute scheduler backstop in check_and_post.
+    from app.tasks.sync_helpers import ensure_daily_counts_reset
 
     try:
-        with SyncSessionLocal() as s:
-            s.execute(update(Account).values(posts_today=0))
-            s.commit()
-        log_event_sync("INFO", "system", "Daily post counts reset")
-        return {"ok": True}
+        done = ensure_daily_counts_reset()
+        return {"ok": True, "reset": done}
     except Exception:  # noqa: BLE001
         log.exception("reset_daily_counts failed")
         return {"error": "failed"}
