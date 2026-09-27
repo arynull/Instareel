@@ -291,6 +291,10 @@ class TestReapStalePosting:
             p = s.get(Post, pid)
             assert p.status == PostStatus.failed
             assert "Stale 'posting'" in (p.fail_reason or "")
+            # The video is quarantined in the same transaction.
+            v = s.get(Video, p.video_id)
+            assert v.status == VideoStatus.failed
+            assert "Quarantined" in (v.failed_reason or "")
             n = s.query(Notification).filter_by(
                 dedup_key=f"stale-posting:{pid}").one()
             assert n.severity == NotificationSeverity.CRITICAL
@@ -304,14 +308,39 @@ class TestReapStalePosting:
         with factory() as s:
             assert s.get(Post, pid).status == PostStatus.posting
 
-    def test_reaped_video_becomes_reschedulable(self, factory):
-        # After the reaper marks the row failed, find_blocking_sibling must
-        # no longer see a stale 'posting' sibling for the same video.
+    def test_reaped_video_is_quarantined_not_reschedulable(self, factory):
+        # Fail-safe: the reaper quarantines the video as failed so the
+        # scheduler cannot auto-retry it at the next slot — a double upload
+        # is worse than a missed one. Only a manual reprocess/retry re-arms
+        # it, after the user verifies Instagram.
+        from sqlalchemy import update
+
         from app.tasks import sync_helpers as sched
         from app.tasks.periodic_tasks import reap_stale_posting
 
         pid = self._posting_post(factory, minutes_ago=60, md5="reap3")
+        with factory() as s:
+            s.execute(
+                update(Video)
+                .where(Video.md5_hash == "reap3")
+                .values(status=VideoStatus.processed)
+            )
+            s.commit()
         reap_stale_posting.run()
         with factory() as s:
             p = s.get(Post, pid)
-            assert sched.find_blocking_sibling(s, 999999, p.video_id) is None
+            assert p.status == PostStatus.failed
+            v = s.get(Video, p.video_id)
+            assert v.status == VideoStatus.failed
+            # Queue mode: the picker only considers processed videos.
+            picked = sched.next_video(s)
+            assert picked is None or picked.id != v.id
+            # Pinned mode: a rule pinned to it waits instead of firing.
+            rule = ScheduleRule(
+                name="qpin", day_of_week=-1, hour=6, pinned_video_id=v.id
+            )
+            s.add(rule)
+            s.flush()
+            video, disposition = sched.resolve_rule_video(s, rule, set())
+            assert video is None
+            assert disposition == "wait"

@@ -388,3 +388,44 @@ class TestFreshBugRegressions:
 
         assert env.get_source(sid).status == SourceStatus.idle
         assert env.video_count() == 0
+
+    def test_stop_during_pacing_reports_stopped(self, env, monkeypatch):
+        # Stop requested while pacing() sleeps between items used to break
+        # out of the loop without setting stopped_early, so the run was
+        # reported "completed". Regression for the bare `if pacing(): break`.
+        import app.services.anon_ingest as anon_mod
+        from app.tasks import source_tasks
+
+        entries = [
+            {"shortcode": f"psc{i}", "is_video": True,
+             "product_type": "clips", "caption": None}
+            for i in range(1, 4)
+        ]
+        monkeypatch.setattr(anon_mod, "list_public_posts",
+                            lambda *a, **k: (entries, None))
+
+        def fake_download(sc, dl_dir, **k):
+            p = Path(dl_dir) / f"{sc}.mp4"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"FAKEVIDEO-" + sc.encode())
+            return ({"caption": None, "video": str(p), "cover": None}, None)
+
+        monkeypatch.setattr(anon_mod, "download_post", fake_download)
+
+        # _stopped: False for the loop-entry check of item 1, True from the
+        # pacing() call after its download (stop lands between items).
+        calls = {"n": 0}
+
+        def fake_stopped(s, sid_):
+            calls["n"] += 1
+            return calls["n"] >= 2
+
+        monkeypatch.setattr(source_tasks, "_stopped", fake_stopped)
+        sid = env.make_source(max_items=20)
+        r = env.run(sid)
+        assert calls["n"] >= 2, "the pacing() path was never reached"
+        assert r["status"] == "stopped"
+        from app.models import SourceStatus
+
+        assert env.get_source(sid).status == SourceStatus.idle
+        assert env.video_count() == 1

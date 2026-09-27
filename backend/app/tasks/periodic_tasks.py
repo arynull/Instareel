@@ -407,13 +407,15 @@ def reap_stale_posting():
     and the slot is already marked fired (silent loss). Worse, after
     SIBLING_STALE_HOURS find_blocking_sibling() ignores the stale row and a
     later slot can upload the same video twice. The reaper marks such rows
-    failed promptly and notifies, so the video becomes reschedulable
-    manually. Never raises.
+    failed promptly and notifies. The video is quarantined as failed too —
+    the upload may or may not have reached Instagram, so the scheduler must
+    NOT auto-retry it; it only becomes postable again after the user
+    verifies Instagram and reprocesses/retries manually. Never raises.
     """
     from sqlalchemy import select
 
     from app.database import SyncSessionLocal
-    from app.models import Account, Post, PostStatus
+    from app.models import Account, Post, PostStatus, Video, VideoStatus
     from app.tasks.sync_helpers import (
         as_aware_utc,
         log_event_sync,
@@ -446,6 +448,18 @@ def reap_stale_posting():
                     "died or lost the task mid-upload. The upload may or may not "
                     "have reached Instagram: verify there before re-posting."
                 )
+                # Quarantine the video in the same transaction: with only the
+                # post failed, the scheduler would auto-pick this processed
+                # video at the next slot and risk a double upload.
+                video = s.get(Video, post.video_id)
+                if video is not None and video.status != VideoStatus.posted:
+                    video.status = VideoStatus.failed
+                    video.failed_reason = (
+                        f"Quarantined by the stale-posting reaper: post #{post.id} "
+                        f"sat in 'posting' for {REAP_STALE_POSTING_MINUTES}+ min and "
+                        "may have been uploaded. Verify on Instagram, then "
+                        "reprocess or retry manually."
+                    )
                 reaped.append((post.id, username or "?"))
             s.commit()
         for post_id, username in reaped:
@@ -459,8 +473,10 @@ def reap_stale_posting():
                 "critical",
                 f"Post to @{username} stalled mid-upload",
                 f"Post #{post_id} sat in 'posting' for over {REAP_STALE_POSTING_MINUTES} minutes — "
-                "the worker died or lost the task. It was marked failed; check Instagram, "
-                "then reschedule manually if the video never went up.",
+                "the worker died or lost the task. It was marked failed and its video "
+                "quarantined (it will NOT be retried automatically — the upload may "
+                "already have reached Instagram). Check Instagram, then reprocess or "
+                "retry manually if the video never went up.",
                 link="/dashboard/posts",
                 dedup_key=f"stale-posting:{post_id}",
             )

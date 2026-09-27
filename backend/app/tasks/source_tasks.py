@@ -427,6 +427,10 @@ def ingest_source(self, source_id: int):
                                         f"{consec_fail} consecutive failures, stopping: {exc}")
                     _publish(source_id)
                     if pacing():
+                        # pacing() True == stop requested mid-loop. Without
+                        # this flag the run falls through to 'completed'
+                        # even though the user stopped it.
+                        stopped_early = True
                         break
                 if stopped_early:
                     _bump(s, source, status=SourceStatus.idle, finished_at=_now(),
