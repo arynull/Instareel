@@ -24,36 +24,56 @@ async def due_rules(session, at: dt.datetime | None = None) -> list[ScheduleRule
 
 
 def effective_max_posts(
-    created_at: dt.datetime | None, max_daily_posts: int, now: dt.datetime | None = None
+    created_at: dt.datetime | None, max_daily_posts: int, now: dt.datetime | None = None,
+    warmup_days: int | None = None,
 ) -> int:
     """Warm-up cap shared with the sync scheduler (see tasks.sync_helpers).
 
-    Accounts younger than 7 days post at most 1/day. Tolerates naive
-    datetimes (SQLite) by assuming UTC.
+    Accounts younger than ``warmup_days`` post at most 1/day (None = module
+    default, 0 = disabled). Tolerates naive datetimes (SQLite) by assuming
+    UTC.
     """
     from app.tasks.sync_helpers import WARMUP_DAYS, WARMUP_MAX_POSTS
 
     now = now or _now()
-    if created_at is None:
+    days = WARMUP_DAYS if warmup_days is None else max(0, warmup_days)
+    if created_at is None or days <= 0:
         return max_daily_posts
     ts = created_at
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=dt.timezone.utc)
-    if (now - ts).days < WARMUP_DAYS:
+    if (now - ts).days < days:
         return min(WARMUP_MAX_POSTS, max_daily_posts)
     return max_daily_posts
+
+
+async def _warmup_days_async(session) -> int:
+    """Configured warm-up length for the async scheduler path."""
+    from app.models import Setting
+    from app.tasks.sync_helpers import WARMUP_DAYS
+
+    row = (
+        (await session.execute(select(Setting).where(Setting.key == "warmup_days")))
+        .scalars()
+        .first()
+    )
+    try:
+        return max(0, int(row.value)) if row and row.value else WARMUP_DAYS
+    except (TypeError, ValueError):
+        return WARMUP_DAYS
 
 
 async def eligible_account(session, account_id: int | None = None) -> Account | None:
     from app.tasks.sync_helpers import as_aware_utc
 
     now = _now()
+    wdays = await _warmup_days_async(session)
     if account_id:
         acc = await session.get(Account, account_id)
         if acc and acc.status == AccountStatus.active:
             cd = as_aware_utc(acc.cooldown_until)
             if not cd or cd <= now:
-                if acc.posts_today < effective_max_posts(acc.created_at, acc.max_daily_posts, now):
+                if acc.posts_today < effective_max_posts(acc.created_at, acc.max_daily_posts, now, warmup_days=wdays):
                     return acc
         return None
     q = (
@@ -67,7 +87,7 @@ async def eligible_account(session, account_id: int | None = None) -> Account | 
         .order_by(Account.last_post.asc().nulls_first())
     )
     for acc in (await session.execute(q.limit(500))).scalars().all():
-        if acc.posts_today < effective_max_posts(acc.created_at, acc.max_daily_posts, now):
+        if acc.posts_today < effective_max_posts(acc.created_at, acc.max_daily_posts, now, warmup_days=wdays):
             return acc
     return None
 

@@ -183,13 +183,25 @@ async def evaluate_account(db, account_id: int) -> dict | None:
         )
     ).all()
     streak, failed_7d, posted_7d = summarize_statuses([st for (st,) in rows])
+    from app.models import Setting as SettingModel
+    from app.tasks.sync_helpers import WARMUP_DAYS as _WARMUP_DEFAULT
+
+    wrow = (
+        (await db.execute(select(SettingModel).where(SettingModel.key == "warmup_days")))
+        .scalars()
+        .first()
+    )
+    try:
+        wdays = max(0, int(wrow.value)) if wrow and wrow.value else _WARMUP_DEFAULT
+    except (TypeError, ValueError):
+        wdays = _WARMUP_DEFAULT
     out = compute_health(
         status=account.status.value,
         cooldown_until=account.cooldown_until,
         proxy_fail_count=proxy.fail_count if proxy else 0,
         proxy_healthy=bool(proxy.is_healthy) if proxy else True,
         posts_today=account.posts_today,
-        daily_cap=effective_max_posts(account.created_at, account.max_daily_posts, now),
+        daily_cap=effective_max_posts(account.created_at, account.max_daily_posts, now, warmup_days=wdays),
         fail_streak=streak,
         failed_7d=failed_7d,
         posted_7d=posted_7d,

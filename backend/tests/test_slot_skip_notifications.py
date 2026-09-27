@@ -203,3 +203,53 @@ def test_account_skip_reason_none_when_eligible(factory, tmp_path):
     acc_id = _seed(factory, tmp_path, [], posts_today=0, account_age_days=30)
     with factory() as s:
         assert account_skip_reason(s, acc_id) is None
+
+
+# ---- configurable warm-up ----
+
+def test_warmup_days_zero_disables_cap(factory, tmp_path, monkeypatch):
+    """A long-established IG account newly connected here: no warm-up."""
+    from app.models import Setting as SettingModel
+
+    with factory() as s:
+        s.add(SettingModel(key="warmup_days", value="0", category="scheduler"))
+        s.commit()
+    # Young account (3 days) at posts_today=1 would be capped at 1 by default…
+    _seed(
+        factory, tmp_path,
+        [{"hour": NOW.hour, "minute": NOW.minute}],
+        n_videos=2, posts_today=1, account_age_days=3,
+    )
+    _freeze(monkeypatch, NOW)
+    res, fired = _tick(factory, monkeypatch)
+    assert res["created"] == 1
+    assert len(fired) == 1
+    assert _skips(factory) == []
+
+
+def test_warmup_days_setting_default_and_invalid(factory):
+    from app.tasks.sync_helpers import WARMUP_DAYS, warmup_days_setting
+    from app.models import Setting as SettingModel
+
+    with factory() as s:
+        assert warmup_days_setting(s) == WARMUP_DAYS  # no row → default
+        s.add(SettingModel(key="warmup_days", value="bogus", category="scheduler"))
+        s.commit()
+        assert warmup_days_setting(s) == WARMUP_DAYS  # invalid → default
+        s.execute(
+            SettingModel.__table__.update()
+            .where(SettingModel.key == "warmup_days")
+            .values(value="0")
+        )
+        s.commit()
+        assert warmup_days_setting(s) == 0
+
+
+def test_effective_max_posts_warmup_days_param():
+    from app.tasks.sync_helpers import effective_max_posts
+
+    now = dt.datetime.now(dt.timezone.utc)
+    fresh = now - dt.timedelta(days=3)
+    assert effective_max_posts(fresh, 3, now) == 1  # default warm-up
+    assert effective_max_posts(fresh, 3, now, warmup_days=0) == 3  # disabled
+    assert effective_max_posts(fresh, 3, now, warmup_days=2) == 3  # aged out

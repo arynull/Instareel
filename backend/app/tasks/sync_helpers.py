@@ -164,21 +164,39 @@ def account_age_days(created_at: "dt.datetime | None", now: "dt.datetime | None"
     return (now - ts).total_seconds() / 86400
 
 
-def effective_max_posts(created_at: "dt.datetime | None", max_daily_posts: int, now: "dt.datetime | None" = None) -> int:
-    """Warm-up cap: accounts younger than WARMUP_DAYS post at most 1/day.
+def effective_max_posts(created_at: "dt.datetime | None", max_daily_posts: int, now: "dt.datetime | None" = None, warmup_days: "int | None" = None) -> int:
+    """Warm-up cap: accounts younger than ``warmup_days`` post at most 1/day.
+
+    ``warmup_days=None`` keeps the module default (WARMUP_DAYS); pass 0 to
+    disable the cap entirely — e.g. for a long-established Instagram
+    account that was only recently connected here (``created_at`` is when
+    the account joined this system, not the Instagram account's real age).
 
     Handles naive datetimes (SQLite stores func.now() without tz) by
     assuming UTC, so the same code works on SQLite and Postgres.
     """
     now = now or _now()
-    if created_at is None:
+    days = WARMUP_DAYS if warmup_days is None else max(0, warmup_days)
+    if created_at is None or days <= 0:
         return max_daily_posts
     ts = created_at
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=dt.timezone.utc)
-    if (now - ts).days < WARMUP_DAYS:
+    if (now - ts).days < days:
         return min(WARMUP_MAX_POSTS, max_daily_posts)
     return max_daily_posts
+
+
+def warmup_days_setting(session) -> int:
+    """Configured warm-up length (days); 0 disables the new-account cap.
+
+    Editable on the dashboard Settings page (scheduler → warmup_days).
+    Falls back to WARMUP_DAYS when the setting row is missing/invalid.
+    """
+    try:
+        return max(0, int(get_setting(session, "warmup_days", str(WARMUP_DAYS))))
+    except (TypeError, ValueError):
+        return WARMUP_DAYS
 
 
 def throttle_cooldown_hours(retry_count: int) -> int:
@@ -641,7 +659,11 @@ def eligible_account(session, account_id: "int | None" = None):
         if acc and acc.status == AccountStatus.active:
             cd = as_aware_utc(acc.cooldown_until)
             if not cd or cd <= now:
-                if acc.posts_today < effective_max_posts(acc.created_at, acc.max_daily_posts, now):
+                cap = effective_max_posts(
+                    acc.created_at, acc.max_daily_posts, now,
+                    warmup_days=warmup_days_setting(session),
+                )
+                if acc.posts_today < cap:
                     return acc
         return None
     q = (
@@ -657,8 +679,9 @@ def eligible_account(session, account_id: "int | None" = None):
     # Warm-up cap is per-account age — filter in Python over the ordered set
     # so a fresh account yields to older ones instead of blocking the slot.
     # Capped at 500 rows: the accounts table is tiny, this is a guardrail.
+    wdays = warmup_days_setting(session)
     for acc in session.execute(q.limit(500)).scalars().all():
-        if acc.posts_today < effective_max_posts(acc.created_at, acc.max_daily_posts, now):
+        if acc.posts_today < effective_max_posts(acc.created_at, acc.max_daily_posts, now, warmup_days=wdays):
             return acc
     return None
 
@@ -682,17 +705,19 @@ def account_skip_reason(session, account_id: "int | None") -> str | None:
         cd = as_aware_utc(acc.cooldown_until)
         if cd and cd > now:
             return f"@{acc.username} is in cooldown until {cd:%H:%M} UTC"
-        cap = effective_max_posts(acc.created_at, acc.max_daily_posts, now)
+        wdays = warmup_days_setting(session)
+        cap = effective_max_posts(acc.created_at, acc.max_daily_posts, now, warmup_days=wdays)
         if acc.posts_today >= cap:
             warm = ""
             created = acc.created_at
             if created is not None:
                 if created.tzinfo is None:
                     created = created.replace(tzinfo=dt.timezone.utc)
-                if (now - created).days < WARMUP_DAYS:
+                if wdays > 0 and (now - created).days < wdays:
                     warm = (
                         f" — new-account warm-up: max {WARMUP_MAX_POSTS}/day "
-                        f"for the first {WARMUP_DAYS} days"
+                        f"for the first {wdays} days (set scheduler → "
+                        f"warmup_days to 0 to disable)"
                     )
             return (
                 f"daily post limit reached for @{acc.username} "

@@ -384,6 +384,10 @@ async def clear_logs(
 DEFAULT_SETTINGS = {
     "auto_process_on_upload": ("true", "processing"),
     "post_jitter_minutes": ("5", "scheduler"),
+    # New-account warm-up: accounts younger than this many days post at most
+    # 1/day (anti-ban protection). 0 disables it — e.g. when the Instagram
+    # account is years old and was only recently connected here.
+    "warmup_days": ("7", "scheduler"),
     "pool_country": ("", "proxy"),
     "pool_require_country": ("false", "proxy"),
     "pool_purge_after_days": ("7", "proxy"),
