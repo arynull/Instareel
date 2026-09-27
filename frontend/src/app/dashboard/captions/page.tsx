@@ -33,7 +33,7 @@ export default function CaptionsPage() {
             <div className="grid gap-3 md:grid-cols-3">
               <Field label="Name"><input className="input" value={cap.name} onChange={(e) => setCap({ ...cap, name: e.target.value })} /></Field>
               <Field label="Category"><input className="input" value={cap.category} onChange={(e) => setCap({ ...cap, category: e.target.value })} placeholder="optional" /></Field>
-              <div className="flex items-end"><button className="btn-primary w-full" disabled={!cap.name || !cap.content || createCap.isPending} onClick={() => { createCap.mutate({ url: "/captions", body: { ...cap, category: cap.category || null } }); setCap({ name: "", content: "", category: "" }); }}>{createCap.isPending ? "Adding…" : "Add"}</button></div>
+              <div className="flex items-end"><button className="btn-primary w-full" disabled={!cap.name || !cap.content || createCap.isPending} onClick={() => createCap.mutate({ url: "/captions", body: { ...cap, category: cap.category || null } }, { onSuccess: () => setCap({ name: "", content: "", category: "" }) })}>{createCap.isPending ? "Adding…" : "Add"}</button></div>
             </div>
             <div className="mt-3"><Field label="Content (emoji + line breaks supported)"><textarea className="input" rows={3} value={cap.content} onChange={(e) => setCap({ ...cap, content: e.target.value })} /></Field></div>
           </Card>
@@ -66,7 +66,7 @@ export default function CaptionsPage() {
               <Field label="Tags (comma separated)">
                 <input className="input" value={tag.tags} onChange={(e) => setTag({ ...tag, tags: e.target.value })} placeholder="#reels, #viral, …" />
               </Field>
-              <div className="flex items-end"><button className="btn-primary w-full" disabled={!tag.name || !tag.tags || createTag.isPending} onClick={() => { createTag.mutate({ url: "/hashtags", body: tag }); setTag({ name: "", tags: "" }); }}>{createTag.isPending ? "Adding…" : "Add"}</button></div>
+              <div className="flex items-end"><button className="btn-primary w-full" disabled={!tag.name || !tag.tags || createTag.isPending} onClick={() => createTag.mutate({ url: "/hashtags", body: tag }, { onSuccess: () => setTag({ name: "", tags: "" }) })}>{createTag.isPending ? "Adding…" : "Add"}</button></div>
             </div>
           </Card>
           {l2 ? <Spinner /> : e2 ? <QueryFailed onRetry={() => r2()} /> : ((tags ?? []) as HashtagSet[]).length === 0 ? <EmptyState title="No hashtag sets" /> : (

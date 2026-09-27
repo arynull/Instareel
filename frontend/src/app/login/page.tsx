@@ -24,8 +24,12 @@ export default function LoginPage() {
       localStorage.setItem("refresh_token", data.refresh_token);
       setAuth(username);
       router.push("/dashboard");
-    } catch {
-      setError("Invalid credentials. Check ADMIN_USERNAME / ADMIN_PASSWORD in the backend .env.");
+    } catch (err) {
+      // Never leak backend internals (env var names, stack details) to an
+      // unauthenticated visitor. A response means the server rejected the
+      // credentials; no response means we never reached the server.
+      const reached = (err as { response?: unknown })?.response !== undefined;
+      setError(reached ? "Invalid username or password." : "Cannot reach the server — check your network connection and try again.");
     } finally {
       setBusy(false);
     }

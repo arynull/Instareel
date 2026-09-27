@@ -203,17 +203,19 @@ export default function SourcesPage() {
 
   function submit() {
     if (!canSubmit) return;
-    create.mutate({
-      url: "/sources",
-      body: {
-        username: form.username.trim(),
-        account_id: form.account_id ? Number(form.account_id) : null,
-        max_items: form.max_items,
-        reels_only: form.reels_only, with_covers: form.with_covers, auto_process: form.auto_process,
-        delay_min_s: form.delay_min_s, delay_max_s: form.delay_max_s,
+    create.mutate(
+      {
+        url: "/sources",
+        body: {
+          username: form.username.trim(),
+          account_id: form.account_id ? Number(form.account_id) : null,
+          max_items: form.max_items,
+          reels_only: form.reels_only, with_covers: form.with_covers, auto_process: form.auto_process,
+          delay_min_s: form.delay_min_s, delay_max_s: form.delay_max_s,
+        },
       },
-    });
-    setForm({ username: "", account_id: "", max_items: 50, reels_only: true, with_covers: true, auto_process: true, delay_min_s: 8, delay_max_s: 20 });
+      { onSuccess: () => setForm({ username: "", account_id: "", max_items: 50, reels_only: true, with_covers: true, auto_process: true, delay_min_s: 8, delay_max_s: 20 }) },
+    );
   }
 
   return (

@@ -54,19 +54,27 @@ export default function SchedulePage() {
   }
 
   function submit() {
-    create.mutate({
-      url: "/schedule",
-      body: {
-        name: form.name || `${dayLabel(form.day_of_week)} ${form.hour}:${String(form.minute).padStart(2, "0")}`,
-        day_of_week: form.day_of_week, hour: form.hour, minute: form.minute,
-        account_id: form.account_id ? Number(form.account_id) : null,
-        preferred_effect: form.preferred_effect || null,
-        caption_template_id: form.caption_template_id ? Number(form.caption_template_id) : null,
-        prefer_source_caption: form.prefer_source_caption,
-        pinned_video_id: form.pinned_video_id ? Number(form.pinned_video_id) : null,
+    // An emptied number input parses to NaN (JSON null → 422), so clamp to
+    // the valid range and fall back to sane defaults instead of sending NaN.
+    const hour = Number.isFinite(form.hour) ? Math.min(23, Math.max(0, Math.round(form.hour))) : 12;
+    const minute = Number.isFinite(form.minute) ? Math.min(59, Math.max(0, Math.round(form.minute))) : 0;
+    create.mutate(
+      {
+        url: "/schedule",
+        body: {
+          name: form.name || `${dayLabel(form.day_of_week)} ${hour}:${String(minute).padStart(2, "0")}`,
+          day_of_week: form.day_of_week, hour, minute,
+          account_id: form.account_id ? Number(form.account_id) : null,
+          preferred_effect: form.preferred_effect || null,
+          caption_template_id: form.caption_template_id ? Number(form.caption_template_id) : null,
+          prefer_source_caption: form.prefer_source_caption,
+          pinned_video_id: form.pinned_video_id ? Number(form.pinned_video_id) : null,
+        },
       },
-    });
-    setForm({ name: "", day_of_week: -1, hour: 12, minute: 0, account_id: "", preferred_effect: "", caption_template_id: "", prefer_source_caption: true, pinned_video_id: "" });
+      // Reset the form only after the rule is actually created — on error
+      // the user's input stays so nothing is lost.
+      { onSuccess: () => setForm({ name: "", day_of_week: -1, hour: 12, minute: 0, account_id: "", preferred_effect: "", caption_template_id: "", prefer_source_caption: true, pinned_video_id: "" }) },
+    );
   }
 
   function ruleState(r: ScheduleRule) {

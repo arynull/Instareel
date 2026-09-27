@@ -4,9 +4,22 @@ import { api } from "@/lib/api";
 import { toast } from "@/components/toast";
 
 async function get<T = any>(url: string): Promise<T> {
-  const { data } = await api.get(url);
-  return data;
+  // Overlap guard for polling: if a GET for the same URL is already in
+  // flight (e.g. a 30s refetch racing a slow response past the axios 30s
+  // timeout), share its promise instead of stacking another request.
+  const pending = inflightGets.get(url);
+  if (pending) return pending as Promise<T>;
+  const req = api.get(url).then(({ data }) => data as T);
+  inflightGets.set(url, req);
+  try {
+    return await req;
+  } finally {
+    inflightGets.delete(url);
+  }
 }
+
+// In-flight GETs keyed by URL — see get() above.
+const inflightGets = new Map<string, Promise<unknown>>();
 
 /** Show the API's own result payload as a toast so every action gives visible feedback.
  *  Returns true when it toasted, so callers can supply a fallback message. */
@@ -133,6 +146,7 @@ export function useMarkNotificationRead() {
   return useMutation({
     mutationFn: (id: number) => api.post(`/notifications/${id}/read`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+    onError: (err) => toast("error", errorMessage(err)),
   });
 }
 export function useMarkAllNotificationsRead() {
@@ -140,6 +154,7 @@ export function useMarkAllNotificationsRead() {
   return useMutation({
     mutationFn: () => api.post("/notifications/read-all"),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+    onError: (err) => toast("error", errorMessage(err)),
   });
 }
 export function useBestSlots(accountId: string | number | "") {

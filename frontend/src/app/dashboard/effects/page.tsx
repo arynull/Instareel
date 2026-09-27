@@ -19,7 +19,7 @@ export default function EffectsPage() {
         <div className="grid gap-3 md:grid-cols-3">
           <Field label="Name"><input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="warm_boost" /></Field>
           <Field label="Description"><input className="input" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Warm color grade + slight sharpen" /></Field>
-          <div className="flex items-end"><button className="btn-primary w-full" disabled={!form.name || create.isPending} onClick={() => { create.mutate({ url: "/effects", body: form }); setForm({ name: "", description: "", ffmpeg_filter: "" }); }}>{create.isPending ? "Adding…" : "Add"}</button></div>
+          <div className="flex items-end"><button className="btn-primary w-full" disabled={!form.name || create.isPending} onClick={() => create.mutate({ url: "/effects", body: form }, { onSuccess: () => setForm({ name: "", description: "", ffmpeg_filter: "" }) })}>{create.isPending ? "Adding…" : "Add"}</button></div>
         </div>
         <div className="mt-3"><Field label="FFmpeg video filter (applied after crop/scale)"><input className="input font-mono text-xs" value={form.ffmpeg_filter} onChange={(e) => setForm({ ...form, ffmpeg_filter: e.target.value })} placeholder="eq=saturation=1.2:contrast=1.05,unsharp=5:5:0.5" /></Field></div>
       </Card>

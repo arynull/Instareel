@@ -118,7 +118,7 @@ export default function ProxiesPage() {
   const toggleSource = useApiMutation("put", [["proxy-sources"]], "Source updated");
   const removeSource = useApiMutation("delete", [["proxy-sources"]], "Source deleted");
   const [srcForm, setSrcForm] = useState({ name: "", url: "", default_protocol: "http", default_country: "" });
-  const [form, setForm] = useState({ url: "", protocol: "http", username: "", password: "", country: "" });
+  const [form, setForm] = useState({ url: "", protocol: "http", username: "", password: "" });
   const [impFile, setImpFile] = useState<File | null>(null);
   const [impProto, setImpProto] = useState("http");
   const [impCountry, setImpCountry] = useState("");
@@ -204,7 +204,7 @@ export default function ProxiesPage() {
           </Field>
           <Field label="Username"><input className="input" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} /></Field>
           <Field label="Password"><input className="input" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field>
-          <div className="flex items-end"><button className="btn-primary w-full" disabled={!form.url || create.isPending} onClick={() => { create.mutate({ url: "/proxies", body: { ...form, username: form.username || null, password: form.password || null, country: form.country || null } }); setForm({ url: "", protocol: "http", username: "", password: "", country: "" }); }}>{create.isPending ? "Adding…" : "Add"}</button></div>
+          <div className="flex items-end"><button className="btn-primary w-full" disabled={!form.url || create.isPending} onClick={() => create.mutate({ url: "/proxies", body: { ...form, username: form.username || null, password: form.password || null } }, { onSuccess: () => setForm({ url: "", protocol: "http", username: "", password: "" }) })}>{create.isPending ? "Adding…" : "Add"}</button></div>
         </div>
       </Card>
       <Card>
@@ -252,7 +252,7 @@ export default function ProxiesPage() {
             </select>
           </Field>
           <Field label="Default country"><input className="input" value={srcForm.default_country} onChange={(e) => setSrcForm({ ...srcForm, default_country: e.target.value })} placeholder="DE" maxLength={2} /></Field>
-          <div className="flex items-end"><button className="btn-primary w-full" disabled={!srcForm.name || !srcForm.url || createSource.isPending} onClick={() => { createSource.mutate({ url: "/proxies/sources", body: srcForm }); setSrcForm({ name: "", url: "", default_protocol: "http", default_country: "" }); }}>{createSource.isPending ? "Adding…" : "Add source"}</button></div>
+          <div className="flex items-end"><button className="btn-primary w-full" disabled={!srcForm.name || !srcForm.url || createSource.isPending} onClick={() => createSource.mutate({ url: "/proxies/sources", body: srcForm }, { onSuccess: () => setSrcForm({ name: "", url: "", default_protocol: "http", default_country: "" }) })}>{createSource.isPending ? "Adding…" : "Add source"}</button></div>
         </div>
         <div className="mt-2 space-y-1">
           {((sourceRows ?? []) as ProxySource[]).map((s) => (

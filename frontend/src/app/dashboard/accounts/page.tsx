@@ -73,7 +73,7 @@ export default function AccountsPage() {
           <div className="flex items-end">
             <button
               className="btn-primary w-full" disabled={!form.username || !form.password || create.isPending}
-              onClick={() => { create.mutate({ url: "/accounts", body: form }); setForm({ username: "", password: "", max_daily_posts: 3 }); }}
+              onClick={() => create.mutate({ url: "/accounts", body: form }, { onSuccess: () => setForm({ username: "", password: "", max_daily_posts: 3 }) })}
             >
               {create.isPending ? "Adding…" : "Add account"}
             </button>
