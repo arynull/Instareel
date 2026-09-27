@@ -45,8 +45,10 @@ def fetch_all_analytics():
     from app.utils.instagram_helpers import session_path_for
 
     try:
-        # Jitter the start so runs don't hit IG at the exact same minute daily.
-        time.sleep(random.uniform(0, 90))
+        # NOTE: no startup sleep here. This task runs on the --pool=solo
+        # worker — a blocking sleep of up to 90s would stall check_and_post
+        # ticks (late posts) and make the worker look dead to health pings.
+        # Human-like pacing happens between the IG API calls below instead.
         now = dt.datetime.now(dt.timezone.utc)
         cutoff = now - dt.timedelta(days=7)
         recent = now - dt.timedelta(hours=ANALYTICS_MIN_INTERVAL_HOURS)
@@ -219,9 +221,6 @@ def refresh_proxy_pool():
     policy (pool_country + pool_require_country Settings) gates inserts.
     Stale auto rows are reaped; manual rows are never touched.
     """
-    import random
-    import time
-
     from sqlalchemy import select
 
     from app.core.security import encrypt_secret
@@ -242,7 +241,9 @@ def refresh_proxy_pool():
     )
 
     try:
-        time.sleep(random.uniform(0, 120))
+        # NOTE: no startup sleep here — same reason as fetch_all_analytics:
+        # the --pool=solo worker must stay responsive; the SSRF-guarded
+        # fetches below are the actual paced work.
         with SyncSessionLocal() as s:
             sources = s.execute(
                 select(ProxySource).where(ProxySource.is_active.is_(True))
