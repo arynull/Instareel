@@ -31,6 +31,9 @@ celery.conf.beat_schedule = {
     "proxy-pool-refresh": {"task": "tasks.proxy_tasks.refresh_proxy_pool", "schedule": crontab(hour="*/3", minute=17)},
     "media-cleanup": {"task": "tasks.cleanup_tasks.clean_old_media", "schedule": crontab(hour=4, minute=0)},
     "reset-daily-counts": {"task": "tasks.account_tasks.reset_daily_counts", "schedule": crontab(hour=0, minute=0)},
+    # Fail posts wedged in 'posting' (worker died mid-upload) before they can
+    # silently wedge or double-post via the stale-sibling window.
+    "reap-stale-posting": {"task": "tasks.post_tasks.reap_stale_posting", "schedule": crontab(minute="*/10")},
 }
 
 # Explicit imports so workers always register tasks (autodiscover is

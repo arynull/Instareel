@@ -209,15 +209,23 @@ def execute_post(self, post_id: int):
     from app.utils.instagram_helpers import session_path_for
 
     def set_status(status: PostStatus, **fields):
+        """Move the post out of 'posting'.
+
+        Returns False when the row is no longer ours — e.g. the
+        stale-posting reaper already failed it while this worker was stuck.
+        The caller must then NOT treat the outcome as its own (no notify,
+        no account touch, no retry): the reaper owns the row now.
+        """
         with SyncSessionLocal() as s:
             post = s.get(Post, post_id)
-            if not post:
-                return
+            if not post or post.status != PostStatus.posting:
+                return False
             post.status = status
             for k, v in fields.items():
                 setattr(post, k, v)
             s.commit()
         publish_sync("post_status_update", {"post_id": post_id, "status": status.value})
+        return True
 
     def touch_account(ok: bool, err: str = ""):
         with SyncSessionLocal() as s:
@@ -365,12 +373,15 @@ def execute_post(self, post_id: int):
                 # Park it back as scheduled (not failed) so the celery retry
                 # re-claims it cleanly instead of tripping over a failed row.
                 countdown = 2 ** retries * 60
-                set_status(
+                if not set_status(
                     PostStatus.scheduled,
                     fail_reason=error[:2000],
                     retry_count=retries + 1,
                     scheduled_for=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=countdown),
-                )
+                ):
+                    # Lost a race with the stale-posting reaper — it owns the
+                    # row now; don't resurrect it with a retry.
+                    return {"post_id": post_id, "status": "reaped", "error": error}
                 touch_account(False, error)
                 log_event_sync("ERROR", "post", f"Post {post_id} to @{username} failed: {error}")
                 if kind == "login_required":
@@ -406,23 +417,29 @@ def execute_post(self, post_id: int):
                 error + " [trial reel was ON — regular reels may still work; retry with trial off]"
                 if want_trial else error
             )
-            set_status(PostStatus.failed, fail_reason=fail_note[:2000], retry_count=retries + 1)
-            log_event_sync("ERROR", "post", f"Post {post_id} to @{username} failed: {fail_note}")
-            notify_sync(
-                "post_failed",
-                "critical",
-                f"Post to @{username} failed",
-                fail_note[:500],
-                link="/dashboard/posts",
-            )
-            return {"post_id": post_id, "status": "failed", "error": error}
+            if set_status(PostStatus.failed, fail_reason=fail_note[:2000], retry_count=retries + 1):
+                log_event_sync("ERROR", "post", f"Post {post_id} to @{username} failed: {fail_note}")
+                notify_sync(
+                    "post_failed",
+                    "critical",
+                    f"Post to @{username} failed",
+                    fail_note[:500],
+                    link="/dashboard/posts",
+                )
+                return {"post_id": post_id, "status": "failed", "error": error}
+            # Lost a race with the stale-posting reaper — it already failed
+            # the row and notified; don't double-notify or touch the account.
+            return {"post_id": post_id, "status": "reaped", "error": error}
 
-        set_status(
+        if not set_status(
             PostStatus.posted,
             ig_media_id=media_id,
             ig_permalink=permalink,
             posted_at=dt.datetime.now(dt.timezone.utc),
-        )
+        ):
+            # Lost a race with the stale-posting reaper (upload took 45+ min):
+            # the row is failed and the admin was notified — don't resurrect it.
+            return {"post_id": post_id, "status": "reaped", "url": permalink}
         touch_account(True)
         # Archive the video by captured id so it is never posted twice, even
         # if the post row itself was deleted in the meantime.

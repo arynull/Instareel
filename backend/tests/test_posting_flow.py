@@ -251,3 +251,67 @@ def test_full_tick_posts_end_to_end(factory, tmp_path, monkeypatch):
     monkeypatch.setattr(pt_mod, "execute_post", real_task)
     out = real_task.apply(args=[fired[0]]).get()
     assert out["status"] == "posted"
+
+
+class TestReapStalePosting:
+    def _posting_post(self, factory, minutes_ago, md5):
+        import datetime as dt
+
+        from sqlalchemy import update
+
+        with factory() as s:
+            acc = Account(
+                username=f"reapacc{md5}", password_enc=encrypt_secret("pw"),
+                status=AccountStatus.active)
+            s.add(acc)
+            s.flush()
+            v = Video(original_filename="r.mp4", raw_path="/tmp/r.mp4",
+                      file_size=1, md5_hash=md5)
+            s.add(v)
+            s.flush()
+            p = Post(video_id=v.id, account_id=acc.id, status=PostStatus.posting)
+            s.add(p)
+            s.flush()
+            pid = p.id
+            s.execute(
+                update(Post).where(Post.id == pid).values(
+                    updated_at=dt.datetime.now(dt.timezone.utc)
+                    - dt.timedelta(minutes=minutes_ago)))
+            s.commit()
+        return pid
+
+    def test_reaps_stale_posting_row(self, factory):
+        from app.models import Notification, NotificationSeverity
+        from app.tasks.periodic_tasks import reap_stale_posting
+
+        pid = self._posting_post(factory, minutes_ago=60, md5="reap1")
+        res = reap_stale_posting.run()
+        assert res == {"reaped": 1}
+        with factory() as s:
+            p = s.get(Post, pid)
+            assert p.status == PostStatus.failed
+            assert "Stale 'posting'" in (p.fail_reason or "")
+            n = s.query(Notification).filter_by(
+                dedup_key=f"stale-posting:{pid}").one()
+            assert n.severity == NotificationSeverity.CRITICAL
+
+    def test_fresh_posting_row_untouched(self, factory):
+        from app.tasks.periodic_tasks import reap_stale_posting
+
+        pid = self._posting_post(factory, minutes_ago=5, md5="reap2")
+        res = reap_stale_posting.run()
+        assert res == {"reaped": 0}
+        with factory() as s:
+            assert s.get(Post, pid).status == PostStatus.posting
+
+    def test_reaped_video_becomes_reschedulable(self, factory):
+        # After the reaper marks the row failed, find_blocking_sibling must
+        # no longer see a stale 'posting' sibling for the same video.
+        from app.tasks import sync_helpers as sched
+        from app.tasks.periodic_tasks import reap_stale_posting
+
+        pid = self._posting_post(factory, minutes_ago=60, md5="reap3")
+        reap_stale_posting.run()
+        with factory() as s:
+            p = s.get(Post, pid)
+            assert sched.find_blocking_sibling(s, 999999, p.video_id) is None

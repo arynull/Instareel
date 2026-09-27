@@ -392,3 +392,84 @@ def reset_daily_counts():
     except Exception:  # noqa: BLE001
         log.exception("reset_daily_counts failed")
         return {"error": "failed"}
+
+
+# A post row sits in 'posting' only while a worker is actively executing it
+# (claim -> pre-post sleep <= 120s -> upload, a few minutes). Retryable
+# failures park the row back to 'scheduled' before the celery retry, so
+# anything still in 'posting' past this age means the worker died or lost
+# the task mid-upload. Well under SIBLING_STALE_HOURS (2h).
+REAP_STALE_POSTING_MINUTES = 45
+
+
+@celery.task(name="tasks.post_tasks.reap_stale_posting")
+def reap_stale_posting():
+    """Fail posts wedged in 'posting' (worker died mid-upload).
+
+    Without this, a crash between claim_post() and the final set_status()
+    leaves the row invisible forever — the due query only sees 'scheduled'
+    and the slot is already marked fired (silent loss). Worse, after
+    SIBLING_STALE_HOURS find_blocking_sibling() ignores the stale row and a
+    later slot can upload the same video twice. The reaper marks such rows
+    failed promptly and notifies, so the video becomes reschedulable
+    manually. Never raises.
+    """
+    from sqlalchemy import select
+
+    from app.database import SyncSessionLocal
+    from app.models import Account, Post, PostStatus
+    from app.tasks.sync_helpers import (
+        as_aware_utc,
+        log_event_sync,
+        notify_sync,
+        publish_sync,
+    )
+
+    try:
+        now = dt.datetime.now(dt.timezone.utc)
+        cutoff = now - dt.timedelta(minutes=REAP_STALE_POSTING_MINUTES)
+        # Filter in Python: updated_at comes back naive from SQLite and
+        # string-comparing it against an aware cutoff in SQL is fragile.
+        # 'posting' rows are bounded by worker concurrency (a handful).
+        reaped = []
+        with SyncSessionLocal() as s:
+            rows = (
+                s.execute(
+                    select(Post, Account.username)
+                    .join(Account, Post.account_id == Account.id, isouter=True)
+                    .where(Post.status == PostStatus.posting)
+                )
+            ).all()
+            for post, username in rows:
+                ts = as_aware_utc(post.updated_at)
+                if ts is None or ts >= cutoff:
+                    continue
+                post.status = PostStatus.failed
+                post.fail_reason = (
+                    f"Stale 'posting' for {REAP_STALE_POSTING_MINUTES}+ min — the worker "
+                    "died or lost the task mid-upload. The upload may or may not "
+                    "have reached Instagram: verify there before re-posting."
+                )
+                reaped.append((post.id, username or "?"))
+            s.commit()
+        for post_id, username in reaped:
+            log_event_sync(
+                "WARNING", "post",
+                f"Post {post_id} to @{username} reaped from stale 'posting'",
+                {"post_id": post_id},
+            )
+            notify_sync(
+                "post_failed",
+                "critical",
+                f"Post to @{username} stalled mid-upload",
+                f"Post #{post_id} sat in 'posting' for over {REAP_STALE_POSTING_MINUTES} minutes — "
+                "the worker died or lost the task. It was marked failed; check Instagram, "
+                "then reschedule manually if the video never went up.",
+                link="/dashboard/posts",
+                dedup_key=f"stale-posting:{post_id}",
+            )
+            publish_sync("post_status_update", {"post_id": post_id, "status": "failed"})
+        return {"reaped": len(reaped)}
+    except Exception:  # noqa: BLE001
+        log.exception("reap_stale_posting failed")
+        return {"error": "failed"}
