@@ -13,7 +13,8 @@ from app.core.security import decrypt_secret, encrypt_secret
 from app.models import Account, AudioTrack, BioConfig, EffectPreset, Proxy, ProxyProtocol, ProxySource
 from app.schemas.account import ProxyCreate, ProxyOut, ProxyUpdate
 from app.schemas.content import (
-    AudioIn, AudioOut, BioApplyIn, BioIn, BioOut, EffectIn, EffectOut, ProxySourceIn, ProxySourceOut,
+    AudioIn, AudioOut, AudioUpdate, BioApplyIn, BioIn, BioOut, BioUpdate, EffectIn, EffectOut,
+    EffectUpdate, ProxySourceIn, ProxySourceOut, ProxySourceUpdate,
 )
 from app.services.log_service import log_event
 
@@ -113,11 +114,11 @@ async def ensure_bio(body: dict, _: str = Depends(get_current_admin), db: AsyncS
 
 
 @bio_router.put("/{bid}", response_model=BioOut)
-async def update_bio(bid: int, body: BioIn, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
+async def update_bio(bid: int, body: BioUpdate, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     b = await db.get(BioConfig, bid)
     if not b:
         raise HTTPException(404, "Bio not found")
-    if await db.get(Account, body.account_id) is None:
+    if body.account_id is not None and await db.get(Account, body.account_id) is None:
         raise HTTPException(404, "Account not found")
     # Partial update: only explicitly sent fields are touched, so saving one
     # section never wipes the others.
@@ -718,23 +719,27 @@ async def create_source(body: ProxySourceIn, _: str = Depends(get_current_admin)
 
 
 @proxy_router.put("/sources/{sid}", response_model=ProxySourceOut)
-async def update_source(sid: int, body: ProxySourceIn, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
+async def update_source(sid: int, body: ProxySourceUpdate, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     x = await db.get(ProxySource, sid)
     if not x:
         raise HTTPException(404, "Source not found")
-    if body.default_protocol not in ("http", "https", "socks4", "socks5"):
+    data = body.model_dump(exclude_unset=True)
+    if "default_protocol" in data and data["default_protocol"] not in ("http", "https", "socks4", "socks5"):
         raise HTTPException(400, "Invalid default_protocol")
-    _checked_source_url(body.url)
-    clash = (await db.execute(
-        select(ProxySource).where(ProxySource.name == body.name, ProxySource.id != sid)
-    )).scalar_one_or_none()
-    if clash:
-        raise HTTPException(409, "Another source already uses that name")
+    if "url" in data:
+        _checked_source_url(data["url"])
+    if "name" in data:
+        clash = (await db.execute(
+            select(ProxySource).where(ProxySource.name == data["name"], ProxySource.id != sid)
+        )).scalar_one_or_none()
+        if clash:
+            raise HTTPException(409, "Another source already uses that name")
     # Renaming a source orphans its rows' origin label — auto rows stay
     # protected by the purge rule (source != manual), so this is display-only.
-    x.name, x.url = body.name, body.url
-    x.default_protocol, x.default_country = body.default_protocol, (body.default_country or "").upper()
-    x.is_active = body.is_active
+    for k, v in data.items():
+        if k == "default_country":
+            v = (v or "").upper()
+        setattr(x, k, v)
     await db.commit()
     await db.refresh(x)
     return _source_out(x)
@@ -901,7 +906,7 @@ async def create_effect(body: EffectIn, _: str = Depends(get_current_admin), db:
 
 
 @effect_router.put("/{eid}", response_model=EffectOut)
-async def update_effect(eid: int, body: EffectIn, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
+async def update_effect(eid: int, body: EffectUpdate, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     e = await db.get(EffectPreset, eid)
     if not e:
         raise HTTPException(404, "Effect not found")
@@ -1011,20 +1016,19 @@ async def upload_audio(
 
 
 @audio_router.put("/{tid}", response_model=AudioOut)
-async def update_audio(tid: int, body: AudioIn, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
+async def update_audio(tid: int, body: AudioUpdate, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     t = await db.get(AudioTrack, tid)
     if not t:
         raise HTTPException(404, "Audio track not found")
-    clash = (await db.execute(
-        select(AudioTrack).where(AudioTrack.name == body.name, AudioTrack.id != tid)
-    )).scalar_one_or_none()
-    if clash:
-        raise HTTPException(409, "Another track already uses that name")
-    t.name = body.name
-    t.description = body.description
-    t.music_volume = body.music_volume
-    t.duck_original = body.duck_original
-    t.is_active = body.is_active
+    data = body.model_dump(exclude_unset=True)
+    if "name" in data:
+        clash = (await db.execute(
+            select(AudioTrack).where(AudioTrack.name == data["name"], AudioTrack.id != tid)
+        )).scalar_one_or_none()
+        if clash:
+            raise HTTPException(409, "Another track already uses that name")
+    for k, v in data.items():
+        setattr(t, k, v)
     await db.commit()
     await db.refresh(t)
     return _audio_out(t)

@@ -8,7 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_admin, get_db
 from app.models import CaptionTemplate, HashtagSet, ScheduleRule
 from app.schemas.content import (
-    CaptionIn, CaptionOut, HashtagSetIn, HashtagSetOut, ScheduleRuleIn, ScheduleRuleOut,
+    CaptionIn, CaptionOut, CaptionUpdate, HashtagSetIn, HashtagSetOut, HashtagSetUpdate,
+    ScheduleRuleIn, ScheduleRuleOut, ScheduleRuleUpdate,
 )
 
 if TYPE_CHECKING:
@@ -102,7 +103,7 @@ async def create_rule(body: ScheduleRuleIn, _: str = Depends(get_current_admin),
 
 
 @schedule_router.put("/{rule_id}", response_model=ScheduleRuleOut)
-async def update_rule(rule_id: int, body: ScheduleRuleIn, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
+async def update_rule(rule_id: int, body: ScheduleRuleUpdate, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     from app.models import Account, CaptionTemplate
 
     r = await db.get(ScheduleRule, rule_id)
@@ -225,7 +226,7 @@ async def create_caption(body: CaptionIn, _: str = Depends(get_current_admin), d
 
 
 @caption_router.put("/{cid}", response_model=CaptionOut)
-async def update_caption(cid: int, body: CaptionIn, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
+async def update_caption(cid: int, body: CaptionUpdate, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     c = await db.get(CaptionTemplate, cid)
     if not c:
         raise HTTPException(404, "Caption not found")
@@ -293,7 +294,7 @@ async def create_tags(body: HashtagSetIn, _: str = Depends(get_current_admin), d
 
 
 @hashtag_router.put("/{hid}", response_model=HashtagSetOut)
-async def update_tags(hid: int, body: HashtagSetIn, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
+async def update_tags(hid: int, body: HashtagSetUpdate, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     h = await db.get(HashtagSet, hid)
     if not h:
         raise HTTPException(404, "Hashtag set not found")
