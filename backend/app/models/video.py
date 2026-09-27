@@ -2,7 +2,7 @@
 import datetime as dt
 import enum
 
-from sqlalchemy import BigInteger, DateTime, Enum, Float, ForeignKey, Integer, String, Text, Boolean, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, Boolean, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -74,6 +74,9 @@ class Post(Base, TimestampMixin):
     # never conflict with each other or with scheduler posts.
     __table_args__ = (
         UniqueConstraint("account_id", "slot_for", name="uq_posts_account_slot"),
+        # Mirrors migration 0016: without this, fresh create_all() DBs lack
+        # the index that migrated DBs have (schema drift).
+        Index("ix_posts_slot_for", "slot_for"),
     )
 
     video_id: Mapped[int] = mapped_column(ForeignKey("videos.id"), nullable=False)
