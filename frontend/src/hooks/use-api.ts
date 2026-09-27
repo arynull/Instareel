@@ -64,10 +64,15 @@ export function useAccounts() {
 
 /** Videos list: poll only while something is uploaded/processing —
  * once everything settles, refetching stops (and so does the log noise). */
-export function useVideos(status = "") {
+export function useVideos(status = "", opts: { limit?: number } = {}) {
+  const limit = opts.limit ?? 50;
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (limit !== 50) params.set("limit", String(limit));
+  const qs = params.toString();
   return useQuery({
-    queryKey: ["videos", status],
-    queryFn: () => get(status ? `/videos?status=${status}` : "/videos"),
+    queryKey: ["videos", status, limit],
+    queryFn: () => get(`/videos${qs ? `?${qs}` : ""}`),
     refetchInterval: (query) => {
       const rows = (query.state.data ?? []) as { status?: string }[];
       const busy = rows.some((v) => v.status === "uploaded" || v.status === "processing");
@@ -75,10 +80,16 @@ export function useVideos(status = "") {
     },
   });
 }
-export function usePosts(status = "") {
+export function usePosts(status = "", opts: { accountId?: number | null; limit?: number } = {}) {
+  const limit = opts.limit ?? 50;
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (opts.accountId) params.set("account_id", String(opts.accountId));
+  if (limit !== 50) params.set("limit", String(limit));
+  const qs = params.toString();
   return useQuery({
-    queryKey: ["posts", status],
-    queryFn: () => get(status ? `/posts?status=${status}` : "/posts"),
+    queryKey: ["posts", status, opts.accountId ?? "all", limit],
+    queryFn: () => get(`/posts${qs ? `?${qs}` : ""}`),
     refetchInterval: 30000,
   });
 }

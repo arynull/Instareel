@@ -1,6 +1,7 @@
 "use client";
 import type { Account, LogEntry, Post } from "@/types/models";
 import { fmt, timeAgo } from "@/lib/utils";
+import { comparePostRecency } from "./sort";
 
 export function PhoneActivity({
   account,
@@ -13,7 +14,7 @@ export function PhoneActivity({
 }) {
   const mine = posts
     .filter((p) => p.account_id === account.id && p.status === "posted")
-    .sort((a, b) => (b.posted_at ?? b.created_at).localeCompare(a.posted_at ?? a.created_at))
+    .sort(comparePostRecency)
     .slice(0, 5);
   const recent = logs.slice(0, 20);
 

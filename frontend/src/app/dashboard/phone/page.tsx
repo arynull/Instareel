@@ -16,12 +16,16 @@ import type { Account, Bio, LogEntry, Post, Video } from "@/types/models";
 export default function PhonePage() {
   const { data: accountRows, isLoading: accountsLoading } = useAccounts();
   const { data: bioRows } = useBios();
-  const { data: postRows } = usePosts();
-  const { data: videoRows } = useVideos();
+  const { currentAccountId, setCurrentAccountId } = usePhone();
+  // Scope post fetching to the visible account: the API's default limit=50
+  // is global, so client-side filtering alone drops older accounts' posts.
+  const scopedAccountId =
+    currentAccountId ?? ((accountRows as Account[] | undefined)?.[0]?.id ?? null);
+  const { data: postRows } = usePosts("", { accountId: scopedAccountId, limit: 200 });
+  const { data: videoRows } = useVideos("", { limit: 200 });
   const { data: logRows } = useLogs();
   const { data: effectRows } = useEffects();
   const { data: audioRows } = useAudios();
-  const { currentAccountId, setCurrentAccountId } = usePhone();
   const [tab, setTab] = useState<PhoneTab>("profile");
   const [selected, setSelected] = useState<Post | null>(null);
 

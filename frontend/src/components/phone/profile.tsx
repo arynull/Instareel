@@ -5,6 +5,7 @@ import { Clapperboard, Clock, FlaskConical, LayoutGrid } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Account, Bio, IgProfile, Post, Video } from "@/types/models";
 import { useBlobUrl } from "./blob";
+import { comparePostRecency } from "./sort";
 
 function Avatar({ url, username, size }: { url: string | null; username: string; size: string }) {
   if (url) {
@@ -22,7 +23,7 @@ function GridThumb({
   badge,
   onPick,
 }: {
-  videoId: number;
+  videoId: number | null;
   badge?: "scheduled" | "trial" | null;
   onPick: () => void;
 }) {
@@ -31,9 +32,11 @@ function GridThumb({
     <button onClick={onPick} className="relative aspect-square w-full overflow-hidden bg-zinc-100 dark:bg-zinc-800">
       {url ? (
         <img src={url} alt="" className="h-full w-full object-cover" />
-      ) : failed ? (
-        <span className="flex h-full items-center justify-center text-lg text-zinc-400">▦</span>
-      ) : null}
+      ) : (
+        <span className="flex h-full items-center justify-center text-lg text-zinc-400" title={failed ? "Thumbnail unavailable" : videoId === null ? "Video file missing" : undefined}>
+          {videoId === null ? "⚠" : "▦"}
+        </span>
+      )}
       {badge === "scheduled" && (
         <span className="absolute right-1 top-1 rounded-full bg-black/60 p-1 text-white" title="Scheduled">
           <Clock className="h-3 w-3" />
@@ -68,6 +71,7 @@ export function PhoneProfile({
   const [liveFailed, setLiveFailed] = useState(false);
   const [gridTab, setGridTab] = useState<GridTab>("posts");
   const [copied, setCopied] = useState(false);
+  const [shareError, setShareError] = useState(false);
 
   useEffect(() => {
     if (!bio) {
@@ -92,7 +96,7 @@ export function PhoneProfile({
   const byVideo = new Map(videos.map((v) => [v.id, v]));
   const mine = posts
     .filter((p) => p.account_id === account.id && (p.status === "posted" || p.status === "scheduled"))
-    .sort((a, b) => (b.posted_at ?? b.created_at).localeCompare(a.posted_at ?? a.created_at));
+    .sort(comparePostRecency);
   const gridItems =
     gridTab === "reels"
       ? mine.filter((p) => p.status === "posted" && !p.is_trial)
@@ -125,9 +129,12 @@ export function PhoneProfile({
     try {
       await navigator.clipboard.writeText(url);
       setCopied(true);
+      setShareError(false);
       setTimeout(() => setCopied(false), 2000);
     } catch {
       setCopied(false);
+      setShareError(true);
+      setTimeout(() => setShareError(false), 3000);
     }
   }
 
@@ -189,7 +196,7 @@ export function PhoneProfile({
           className="flex-1 rounded-lg bg-zinc-200 py-1.5 text-[13px] font-semibold text-zinc-800 dark:bg-zinc-800 dark:text-zinc-100"
           onClick={shareProfile}
         >
-          {copied ? "Link copied ✓" : "Share profile"}
+          {copied ? "Link copied ✓" : shareError ? "Copy failed ✗" : "Share profile"}
         </button>
       </div>
       <div className="flex justify-around border-t border-zinc-200 dark:border-zinc-800">
@@ -213,11 +220,10 @@ export function PhoneProfile({
       <div className="grid flex-1 grid-cols-3 gap-px bg-zinc-200 content-start dark:bg-zinc-800">
         {gridItems.map((p) => {
           const v = byVideo.get(p.video_id);
-          if (!v) return null;
           return (
             <GridThumb
               key={p.id}
-              videoId={v.id}
+              videoId={v ? v.id : null}
               badge={p.status === "scheduled" ? "scheduled" : p.is_trial ? "trial" : null}
               onPick={() => onPickPost(p)}
             />

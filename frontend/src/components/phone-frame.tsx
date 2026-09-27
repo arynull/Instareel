@@ -1,10 +1,16 @@
 "use client";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { BatteryFull, Signal, Wifi } from "lucide-react";
 
 /** Android-style phone shell. Pure layout — all data comes from props/children. */
 export function PhoneFrame({ children }: { children: ReactNode }) {
-  const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 30000);
+    return () => clearInterval(t);
+  }, []);
+  const time = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return (
     <div className="mx-auto w-[375px] max-w-full overflow-hidden rounded-[2.75rem] border-[10px] border-zinc-900 bg-black shadow-2xl dark:border-zinc-700">
       <div className="relative bg-white dark:bg-black">

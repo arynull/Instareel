@@ -1,8 +1,9 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import type { Account } from "@/types/models";
+import type { Account, Video } from "@/types/models";
+import { waitForVideoProcessed } from "./process-wait";
 
 export function PhoneComposer({ account, effects, audios }: { account: Account; effects: string[]; audios: string[] }) {
   const qc = useQueryClient();
@@ -16,6 +17,22 @@ export function PhoneComposer({ account, effects, audios }: { account: Account; 
   const [step, setStep] = useState("");
   const [done, setDone] = useState("");
   const [error, setError] = useState("");
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  function resetForm() {
+    setFile(null);
+    setCaption("");
+    setHashtags("");
+    setEffect("");
+    setAudio("");
+    setIsTrial(false);
+  }
 
   async function publish() {
     if (!file || busy) return;
@@ -30,33 +47,55 @@ export function PhoneComposer({ account, effects, audios }: { account: Account; 
         headers: { "Content-Type": "multipart/form-data" },
         timeout: 600000,
       });
+      const videoId = (video as Video).id;
       setStep("Saving settings…");
-      await api.put(`/videos/${video.id}/settings`, {
+      await api.put(`/videos/${videoId}/settings`, {
         effect_preset: effect || null,
         audio_track: audio || null,
         is_trial: isTrial,
       });
+      // Upload only queues FFmpeg processing (async celery task) — scheduling
+      // immediately would 400 with "Video must be processed first". Wait for
+      // it here instead, kicking the task explicitly if auto-process is off.
+      await waitForVideoProcessed(videoId, {
+        getStatus: async (id) => {
+          const { data: v } = await api.get(`/videos/${id}`);
+          return { status: (v as Video).status, failed_reason: (v as Video).failed_reason };
+        },
+        triggerProcess: async (id) => {
+          await api.post(`/videos/${id}/process`);
+        },
+        onStep: (s) => {
+          if (mounted.current) setStep(s);
+        },
+        isCancelled: () => !mounted.current,
+      });
       setStep("Scheduling post…");
       await api.post("/posts/schedule", {
-        video_id: video.id,
+        video_id: videoId,
         account_id: account.id,
         caption,
         hashtags,
         is_trial: isTrial,
       });
+      if (!mounted.current) return;
       setDone(`Queued as ${isTrial ? "trial reel" : "reel"} for @${account.username}`);
-      setFile(null);
-      setCaption("");
-      setHashtags("");
+      resetForm();
       qc.invalidateQueries({ queryKey: ["videos"] });
       qc.invalidateQueries({ queryKey: ["posts"] });
       qc.invalidateQueries({ queryKey: ["queue"] });
     } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Publish failed";
+      if (!mounted.current) return;
+      const msg =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        (e as Error)?.message ??
+        "Publish failed";
       setError(String(msg));
     } finally {
-      setBusy(false);
-      setStep("");
+      if (mounted.current) {
+        setBusy(false);
+        setStep("");
+      }
     }
   }
 
