@@ -99,3 +99,14 @@ def test_backup_retention(fixture_proj):
         time.sleep(1.1)  # STAMP has 1s resolution — force distinct tarballs
     kept = list((fixture_proj / "data" / "backups").glob("instareel-*.tar.gz"))
     assert len(kept) == 2
+
+
+def test_sanity_check_has_no_sigpipe_race():
+    """pipefail + `tar | grep -q` is a flaky false failure: grep's early
+    exit closes the pipe while tar is still writing, tar dies with SIGPIPE
+    (141), and the sanity check fails even though the member exists. The
+    listing must be captured into a variable before grepping."""
+    src = open(os.path.join(REPO, "scripts", "backup.sh")).read()
+    assert "| grep -q" not in src, (
+        "tar | grep -q under pipefail SIGPIPE-races; capture the listing first"
+    )

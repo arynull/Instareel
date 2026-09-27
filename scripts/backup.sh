@@ -57,7 +57,12 @@ tar -czf "$TARBALL" \
 rm -f "$SNAP"
 
 # Sanity: the tarball must contain the db snapshot and the media tree.
-if ! tar -tzf "$TARBALL" | grep -q "app-$STAMP.db"; then
+# NOTE: don't pipe tar straight into `grep -q` here — with `pipefail`,
+# grep's early exit closes the pipe while tar is still writing, tar dies
+# with SIGPIPE (141), and the check fails spuriously. Read the listing
+# into a variable first.
+members="$(tar -tzf "$TARBALL")"
+if ! grep -q "app-$STAMP.db" <<< "$members"; then
   echo "backup: ERROR: tarball missing db snapshot" >&2
   exit 1
 fi
