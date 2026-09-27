@@ -76,6 +76,27 @@ Models live in `backend/app/models/`; secrets (IG passwords, proxy passwords)
 are Fernet-encrypted at rest — set a persistent `FERNET_KEY` in `.env`
 (changing it later makes stored credentials unreadable).
 
+## Backup & restore
+
+`/data` (SQLite DB, media, IG sessions) is a host bind mount. Back it up daily:
+
+```bash
+./scripts/backup.sh            # -> ./data/backups/instareel-YYYYMMDD-HHMMSS.tar.gz
+```
+
+The script snapshots SQLite through the online backup API (consistent even
+while the worker is writing), tars the snapshot with `media/` and
+`sessions/`, and keeps the last 7 backups (`BACKUP_KEEP=14` to change).
+Install as a host cron:
+
+```cron
+0 3 * * * /path/to/Instareel/scripts/backup.sh >> /var/log/instareel-backup.log 2>&1
+```
+
+Restore: `docker compose down`, extract the tarball to a temp dir, then copy
+`app-<stamp>.db` over `./data/app.db` and merge `media/` + `sessions/` back
+into `./data/`, then `docker compose up -d`.
+
 ## Troubleshooting
 
 | Symptom | Fix |

@@ -19,6 +19,48 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 log = logging.getLogger("igfunnel")
 
 
+def _safe_db_label(url: str) -> str:
+    """DB URL with credentials stripped — safe for logs."""
+    from urllib.parse import urlparse
+
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return "<unparseable>"
+    if p.scheme.startswith("sqlite"):
+        return f"sqlite:{p.path or ':memory:'}"
+    host = p.hostname or "?"
+    return f"{p.scheme}://{host}:{p.port or '?'}/{p.path.lstrip('/')}"
+
+
+def _safe_redis_label(url: str) -> str:
+    from urllib.parse import urlparse
+
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return "<unparseable>"
+    return f"{p.hostname or '?'}:{p.port or 6379}/{p.path.lstrip('/') or '0'}"
+
+
+def log_effective_config() -> None:
+    """Log the effective (non-secret) configuration at startup.
+
+    Misconfigurations (wrong REDIS_URL host, relative sqlite path, wrong
+    SCHEDULE_TZ) are the classic silent killers here — surfacing them in
+    the boot log makes them visible without leaking any secret.
+    """
+    log.info(
+        "Effective config: env=%s tz=%s db=%s redis=%s media_root=%s grace_min=%s",
+        settings.ENV,
+        settings.SCHEDULE_TZ,
+        _safe_db_label(settings.DATABASE_URL),
+        _safe_redis_label(settings.REDIS_URL),
+        settings.MEDIA_ROOT,
+        settings.SCHEDULE_GRACE_MINUTES,
+    )
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     # Fail closed: default/empty SECRET_KEY lets anyone forge admin JWTs,
@@ -34,6 +76,7 @@ async def lifespan(application: FastAPI):
     n = await seed_default_settings()
     if n:
         log.info("Seeded %d default settings", n)
+    log_effective_config()
     log.info("IG Funnel API ready (env=%s)", settings.ENV)
     yield
 

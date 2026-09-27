@@ -67,3 +67,14 @@ def test_sync_url_still_derived_from_absolute_async_url(in_container, monkeypatc
     monkeypatch.delenv("SYNC_DATABASE_URL", raising=False)
     s = Settings(DATABASE_URL="sqlite+aiosqlite:////data/app.db")
     assert s.SYNC_DATABASE_URL == "sqlite:////data/app.db"
+
+
+def test_effective_config_labels_strip_secrets():
+    from app.main import _safe_db_label, _safe_redis_label
+
+    assert _safe_db_label("postgresql+asyncpg://user:s3cret@dbhost:5432/igfunnel") == \
+        "postgresql+asyncpg://dbhost:5432/igfunnel"
+    assert _safe_db_label("sqlite+aiosqlite:////data/app.db") == "sqlite://data/app.db"
+    assert "s3cret" not in _safe_db_label("postgresql://u:s3cret@h/db")
+    assert _safe_redis_label("redis://:redispass@redis:6379/0") == "redis:6379/0"
+    assert "redispass" not in _safe_redis_label("redis://:redispass@localhost:6379/0")
