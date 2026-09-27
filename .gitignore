@@ -20,3 +20,6 @@ frontend/.next/
 frontend/out/
 *.log
 .DS_Store
+
+# TypeScript incremental build info
+frontend/tsconfig.tsbuildinfo
