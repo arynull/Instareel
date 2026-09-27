@@ -344,3 +344,61 @@ class TestReapStalePosting:
             video, disposition = sched.resolve_rule_video(s, rule, set())
             assert video is None
             assert disposition == "wait"
+
+
+# ---- m5: non-negative fire jitter + async due_rules in SCHEDULE_TZ ----
+
+def test_fire_time_jitter_never_negative(monkeypatch):
+    """Pin randint to its lower bound: the old randint(-jitter, jitter) code
+    yields a past fire time and fails; the fixed randint(0, jitter) yields
+    ~now and passes. Deterministic regression test."""
+    import random as _random
+
+    monkeypatch.setattr(_random, "randint", lambda a, b: a)
+    before = dt.datetime.now(dt.timezone.utc)
+    for setting in ("5", "0", "30", "abc", None, "-3", ""):
+        when = post_tasks.fire_time_with_jitter(setting)
+        assert when >= before - dt.timedelta(seconds=1), setting
+
+
+def test_fire_time_jitter_within_bounds():
+    before = dt.datetime.now(dt.timezone.utc)
+    for _ in range(20):
+        when = post_tasks.fire_time_with_jitter("5")
+        delta = (when - before).total_seconds()
+        assert 0 - 1 <= delta <= 5 * 60 + 1
+
+
+def test_async_due_rules_uses_schedule_tz(tmp_path, monkeypatch):
+    """The async due_rules must match SCHEDULE_TZ wall-clock like the sync
+    scheduler — a 12:00 rule with SCHEDULE_TZ=Asia/Tehran is due at 12:00
+    Tehran (08:30 UTC), not at 12:00 UTC."""
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.services import scheduler_service as sched_async
+
+    monkeypatch.setattr(settings, "SCHEDULE_TZ", "Asia/Tehran")
+
+    async def go():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/tz.db")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with maker() as s:
+            s.add(ScheduleRule(name="tz", day_of_week=-1, hour=12, minute=0, is_active=True))
+            await s.commit()
+            # 12:00 Tehran == 08:30 UTC -> due
+            due = await sched_async.due_rules(
+                s, at=dt.datetime(2026, 9, 27, 8, 30, tzinfo=dt.timezone.utc))
+            assert [r.name for r in due] == ["tz"]
+            # 12:00 UTC == 15:30 Tehran -> not due
+            assert await sched_async.due_rules(
+                s, at=dt.datetime(2026, 9, 27, 12, 0, tzinfo=dt.timezone.utc)) == []
+            # naive input is read as SCHEDULE_TZ wall-clock
+            due2 = await sched_async.due_rules(s, at=dt.datetime(2026, 9, 27, 12, 0))
+            assert [r.name for r in due2] == ["tz"]
+        await engine.dispose()
+
+    asyncio.new_event_loop().run_until_complete(go())

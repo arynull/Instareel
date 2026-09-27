@@ -13,6 +13,21 @@ from app.tasks.celery_app import celery
 log = logging.getLogger("igfunnel.tasks.post")
 
 
+def fire_time_with_jitter(jitter_setting: object) -> dt.datetime:
+    """Post fire time: now + a non-negative jitter of 0..jitter minutes.
+
+    ``jitter_setting`` is the raw ``post_jitter_minutes`` setting value
+    (unparseable/negative → default 5 / clamp 0). Jitter only delays: a
+    negative jitter would set scheduled_for in the past, breaking the
+    upcoming countdown and the slot's fire-time ordering for no benefit.
+    """
+    try:
+        jitter = max(0, int(jitter_setting if jitter_setting is not None else 5))
+    except (TypeError, ValueError):
+        jitter = 5
+    return dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=random.randint(0, jitter))
+
+
 @celery.task(name="tasks.post_tasks.check_and_post", bind=True, max_retries=0)
 def check_and_post(self):
     """Beat entry: create scheduled posts from due rule slots, then fire due posts."""
@@ -127,12 +142,7 @@ def check_and_post(self):
                 )
                 # Fire-time jitter comes from Settings (post_jitter_minutes),
                 # not a hardcoded constant — the toggle actually does something.
-                try:
-                    jitter = max(0, int(sched.get_setting(s, "post_jitter_minutes", "5")))
-                except (TypeError, ValueError):
-                    jitter = 5
-                when = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
-                    minutes=random.randint(-jitter, jitter))
+                when = fire_time_with_jitter(sched.get_setting(s, "post_jitter_minutes", "5"))
                 s.add(
                     Post(
                         video_id=video.id,

@@ -12,8 +12,22 @@ def _now() -> dt.datetime:
 
 
 async def due_rules(session, at: dt.datetime | None = None) -> list[ScheduleRule]:
-    """Rules whose (day/hour/minute) match the current minute and are active."""
-    at = at or _now()
+    """Rules whose (day/hour/minute) match the current minute and are active.
+
+    Rule hours are wall-clock in SCHEDULE_TZ (not UTC) — same convention as
+    the sync scheduler (tasks.sync_helpers.due_rule_slots). The old version
+    matched against UTC, so a 12:00 rule with SCHEDULE_TZ=Asia/Tehran would
+    be seen as due at 12:00 UTC instead of 12:00 Tehran.
+    """
+    from zoneinfo import ZoneInfo
+
+    from app.config import settings
+
+    tz = ZoneInfo(settings.SCHEDULE_TZ)
+    at = at or dt.datetime.now(tz)
+    # Rule hours are wall-clock in SCHEDULE_TZ: normalize any aware input
+    # (e.g. UTC) into it before reading weekday/hour/minute.
+    at = at.astimezone(tz) if at.tzinfo is not None else at.replace(tzinfo=tz)
     q = select(ScheduleRule).where(
         ScheduleRule.is_active.is_(True),
         ((ScheduleRule.day_of_week == -1) | (ScheduleRule.day_of_week == at.weekday())),
