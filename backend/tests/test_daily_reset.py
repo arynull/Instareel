@@ -47,20 +47,32 @@ def _reset_date(maker):
         return row.value if row else None
 
 
-def test_first_run_resets_and_stamps(maker):
+def _stamp(maker, value):
+    with maker() as s:
+        s.add(Setting(key=DAILY_RESET_DATE_KEY, value=value, category="system"))
+        s.commit()
+
+
+def test_first_run_stamps_without_resetting(maker):
+    """First run ever (no stamp row): stamp today, but do NOT zero.
+
+    The counters reflect posts actually made today — a mid-day zeroing
+    (e.g. right after a deploy) would hand out up to max_daily_posts
+    extra posts.
+    """
     _account(maker, posts_today=3)
-    assert ensure_daily_counts_reset() is True
+    assert ensure_daily_counts_reset() is False
     with maker() as s:
         acc = s.query(Account).one()
-        assert acc.posts_today == 0
+        assert acc.posts_today == 3
     today = sync_helpers._schedule_now().date().isoformat()
     assert _reset_date(maker) == today
 
 
 def test_second_run_same_day_is_noop(maker):
     _account(maker, posts_today=3)
-    assert ensure_daily_counts_reset() is True
-    # New posts after the reset must not be wiped by a repeat run.
+    assert ensure_daily_counts_reset() is False  # first run: stamp only
+    # New posts after the stamp must not be wiped by a repeat run.
     with maker() as s:
         s.query(Account).one().posts_today = 2
         s.commit()
@@ -87,19 +99,50 @@ def test_reset_task_returns_status(maker):
     from app.tasks.periodic_tasks import reset_daily_counts
 
     _account(maker, posts_today=1)
+    yesterday = (sync_helpers._schedule_now().date() - dt.timedelta(days=1)).isoformat()
+    _stamp(maker, yesterday)
     assert reset_daily_counts() == {"ok": True, "reset": True}
     assert reset_daily_counts() == {"ok": True, "reset": False}
 
 
+def test_concurrent_first_run_stamps_once_without_resetting(maker):
+    """Two threads racing the first run: both stamp (one wins the PK
+    insert), neither zeroes the counters, both return False."""
+    import threading
+
+    _account(maker, posts_today=3)
+    barrier = threading.Barrier(2)
+    results = []
+
+    def _call():
+        barrier.wait()
+        results.append(ensure_daily_counts_reset())
+
+    threads = [threading.Thread(target=_call) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(results) == [False, False]
+    with maker() as s:
+        assert s.query(Account).one().posts_today == 3
+        rows = s.query(Setting).filter(Setting.key == DAILY_RESET_DATE_KEY).all()
+        assert len(rows) == 1
+        assert rows[0].value == sync_helpers._schedule_now().date().isoformat()
+
+
 def test_concurrent_callers_reset_exactly_once(maker):
-    """Two threads racing the first reset: exactly one performs it.
+    """Two threads racing a stale stamp: exactly one performs the reset.
 
     The stamp flip is a single conditional UPDATE, so the loser sees
-    rowcount 0 (or loses the first-run PK insert) and returns False.
+    rowcount 0 and returns False.
     """
     import threading
 
     _account(maker, posts_today=3)
+    yesterday = (sync_helpers._schedule_now().date() - dt.timedelta(days=1)).isoformat()
+    _stamp(maker, yesterday)
     barrier = threading.Barrier(2)
     results = []
 

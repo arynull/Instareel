@@ -83,6 +83,14 @@ def ensure_daily_counts_reset() -> bool:
     it exactly once per local day, catching up a missed midnight on the
     next run. Returns True when it actually reset.
 
+    First run ever (no stamp row): stamp today WITHOUT zeroing. The
+    counters reflect posts actually made today, and a mid-day zeroing
+    (e.g. right after a deploy) would hand out up to max_daily_posts
+    extra posts. A genuinely missed midnight is caught up from the second
+    run on, when the stamp is stale — the only gap is the upgrade day
+    itself when the preceding midnight was missed, which self-heals at
+    the next midnight and errs toward fewer posts, never more.
+
     Concurrency: the stamp flip is a single conditional UPDATE, so even if
     two callers race (impossible with the production --pool=solo worker, but
     cheap to guarantee), exactly one of them performs the reset — the loser
@@ -106,17 +114,20 @@ def ensure_daily_counts_reset() -> bool:
                 )
                 .values(value=today)
             ).rowcount
-            if not claimed and s.get(Setting, DAILY_RESET_DATE_KEY) is None:
-                # First run ever: no stamp row to flip — create it and reset.
-                # A concurrent first-run loses the PK insert; the winner's
-                # reset stands and the loser just returns False.
-                s.add(Setting(key=DAILY_RESET_DATE_KEY, value=today, category="system"))
-                claimed = 1
             if claimed:
                 s.execute(update(Account).values(posts_today=0))
                 s.commit()
                 log_event_sync("INFO", "system", f"Daily post counts reset ({today})")
                 return True
+            if s.get(Setting, DAILY_RESET_DATE_KEY) is None:
+                # First run ever: no stamp row to flip. Stamp today without
+                # zeroing (see docstring) — a concurrent first-run loses
+                # the PK insert; the winner's stamp stands either way.
+                try:
+                    s.add(Setting(key=DAILY_RESET_DATE_KEY, value=today, category="system"))
+                    s.commit()
+                except Exception:
+                    s.rollback()
             return False
     except Exception:  # noqa: BLE001
         log.exception("ensure_daily_counts_reset failed")
