@@ -387,6 +387,25 @@ def reset_daily_counts():
         return {"error": "failed"}
 
 
+@celery.task(name="tasks.account_tasks.scan_shadowban")
+def scan_shadowban():
+    """Shadowban watch: pause accounts whose reel views collapsed.
+
+    Runs on the fast lane (short DB scan, no IG calls). Delegates to
+    account_health.scan_shadowban_sync; never raises.
+    """
+    from app.database import SyncSessionLocal
+    from app.services.account_health import scan_shadowban_sync
+
+    try:
+        with SyncSessionLocal() as s:
+            results = scan_shadowban_sync(s)
+        return {"ok": True, "accounts": results}
+    except Exception:  # noqa: BLE001 — monitoring must never break the worker
+        log.exception("scan_shadowban failed")
+        return {"error": "failed"}
+
+
 # A post row sits in 'posting' only while a worker is actively executing it
 # (claim -> pre-post sleep <= 120s -> upload, a few minutes). Retryable
 # failures park the row back to 'scheduled' before the celery retry, so

@@ -116,7 +116,8 @@ def client(tmp_path, monkeypatch):
         redis_module, "from_url", _fake_sync_redis_factory(_fresh_store())
     )
     monkeypatch.setattr(
-        celery_app_module, "celery", _FakeCelery({"worker@test": {"ok": "pong"}})
+        celery_app_module, "celery",
+        _FakeCelery({"fast@test": {"ok": "pong"}, "slow@test": {"ok": "pong"}}),
     )
 
     app.dependency_overrides[get_current_admin] = lambda: "admin"
@@ -163,7 +164,8 @@ def test_health_all_ok(client, tmp_path):
     assert set(by_name) == {
         "database",
         "redis",
-        "celery_worker",
+        "celery_worker_fast",
+        "celery_worker_slow",
         "celery_beat",
         "instagram",
         "proxies",
@@ -193,7 +195,8 @@ def test_health_beat_stale_marks_down(client, tmp_path, monkeypatch):
     assert body["overall"] == "down"
     # The other critical checks are unaffected by the stale beat key.
     assert comps["redis"]["status"] == "ok"
-    assert comps["celery_worker"]["status"] == "ok"
+    assert comps["celery_worker_fast"]["status"] == "ok"
+    assert comps["celery_worker_slow"]["status"] == "ok"
 
 
 def test_health_beat_missing_marks_down(client, tmp_path, monkeypatch):
@@ -211,7 +214,8 @@ def test_health_worker_silent_marks_down(client, tmp_path, monkeypatch):
     monkeypatch.setattr(celery_app_module, "celery", _FakeCelery({}))
     body = c.get("/api/v1/system/health").json()
     comps = {c_["name"]: c_ for c_ in body["components"]}
-    assert comps["celery_worker"]["status"] == "down"
+    assert comps["celery_worker_fast"]["status"] == "down"
+    assert comps["celery_worker_slow"]["status"] == "down"
     assert body["overall"] == "down"
 
 

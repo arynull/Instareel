@@ -95,15 +95,23 @@ services:
       retries: 3
       start_period: 40s
 
-  worker:
+  # Task lanes (see backend/app/tasks/celery_app.py): the solo pool runs one
+  # task at a time per process, so a single worker lets a 10-minute FFmpeg
+  # render stall the per-minute scheduler ticks behind it. Two processes —
+  # fast (scheduler, watchdog, heartbeats, proxy checks) and slow (video
+  # processing, uploads, ingest, analytics) — each drain their own queue.
+  # On a 1-vCPU box they time-share the CPU, but the OS scheduler keeps the
+  # fast lane responsive while the slow lane renders.
+  worker-fast:
     build: ./backend
     restart: unless-stopped
-    mem_limit: 2g
-    cpus: 1.0
+    mem_limit: 512m
+    cpus: 0.5
     logging: *default-logging
     env_file: .env
     environment:
       <<: *backend-env
+      WORKER_LANE: fast
     volumes: *app-volumes
     depends_on:
       redis:
@@ -112,11 +120,37 @@ services:
         condition: service_healthy
     # --pool=solo runs a single process; --concurrency is a no-op with it
     # (kept out to avoid implying parallelism that doesn't exist).
-    command: celery -A app.tasks.celery_app.celery worker --loglevel=info --pool=solo
+    # --hostname=fast lets health checks attribute ping replies per lane.
+    command: celery -A app.tasks.celery_app.celery worker --loglevel=info --pool=solo -Q fast --hostname=fast
     healthcheck:
-      # inspect ping round-trips through the broker — proves the worker is
-      # alive AND consuming, not just that the process exists.
-      test: ["CMD-SHELL", "celery -A app.tasks.celery_app.celery inspect ping --timeout 10 2>/dev/null | grep -q pong"]
+      # The alive key is refreshed by a daemon thread every 15s, independent
+      # of task execution — unlike inspect ping, it doesn't flap to
+      # "unhealthy" while the solo pool is inside a task.
+      test: ["CMD-SHELL", "python -c \"from app.tasks.worker_signals import own_lane_alive; raise SystemExit(0 if own_lane_alive() else 1)\""]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+
+  worker-slow:
+    build: ./backend
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: 1.0
+    logging: *default-logging
+    env_file: .env
+    environment:
+      <<: *backend-env
+      WORKER_LANE: slow
+    volumes: *app-volumes
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    command: celery -A app.tasks.celery_app.celery worker --loglevel=info --pool=solo -Q slow --hostname=slow
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from app.tasks.worker_signals import own_lane_alive; raise SystemExit(0 if own_lane_alive() else 1)\""]
       interval: 60s
       timeout: 30s
       retries: 3

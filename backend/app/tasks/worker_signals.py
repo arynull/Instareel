@@ -23,6 +23,15 @@ raised):
   really an outage (crash, deploy, failed container recreate) would be
   mislabeled "Worker was busy" from a stale pre-restart task.
 
+Task lanes (see celery_app.TASK_FAST_QUEUE/TASK_SLOW_QUEUE): with two
+worker processes, every key is namespaced per lane —
+``health:worker_alive:fast`` vs ``health:worker_alive:slow`` — from the
+``WORKER_LANE`` env var (``worker-fast`` / ``worker-slow`` in compose).
+Without the env var (single local-dev worker) keys stay un-suffixed,
+exactly as before. Readers take an explicit ``lane``: ``"fast"``,
+``"slow"``, ``""`` (legacy un-suffixed), or ``None`` for "this process's
+own lane".
+
 Readers:
 
 - ``check_worker_sync`` (health_checks): ping fails + process alive + a
@@ -33,6 +42,7 @@ Readers:
 import datetime as dt
 import json
 import logging
+import os
 import threading
 
 from celery.signals import task_postrun, task_prerun, worker_ready, worker_shutdown
@@ -72,10 +82,34 @@ TASK_LABELS = {
     "tasks.proxy_tasks.refresh_proxy_pool": "refreshing the proxy pool",
     "tasks.cleanup_tasks.clean_old_media": "cleaning up old media",
     "tasks.account_tasks.reset_daily_counts": "resetting daily counters",
+    "tasks.account_tasks.scan_shadowban": "scanning for shadowbans",
     "tasks.source_tasks.ingest_source": "ingesting a source",
     "tasks.health_tasks.beat_heartbeat": "sending its heartbeat",
     "tasks.health_tasks.system_watchdog": "running the watchdog",
 }
+
+
+def _lane() -> str | None:
+    """This worker process's task lane (``fast``/``slow``) or None.
+
+    Set via the ``WORKER_LANE`` env var (docker-compose: worker-fast /
+    worker-slow). Unset for a single local-dev worker — keys stay
+    un-suffixed, exactly the pre-lane behavior. Read at call time (not
+    import time) so tests can monkeypatch the env.
+    """
+    return os.environ.get("WORKER_LANE") or None
+
+
+def _key(base: str, lane: "str | None" = None) -> str:
+    """Redis key for ``base``, namespaced to ``lane``.
+
+    ``lane=None`` means "this process's own lane". Pass an explicit lane
+    (``"fast"``/``"slow"``) to read another worker's signals, or ``""`` for
+    the legacy un-suffixed keys written by a single worker without
+    ``WORKER_LANE``.
+    """
+    lane = _lane() if lane is None else lane
+    return f"{base}:{lane}" if lane else base
 
 
 def _utcnow() -> dt.datetime:
@@ -182,31 +216,56 @@ def busy_task_during_gap(last_run: dt.datetime) -> str | None:
     return None
 
 
-def read_worker_state() -> dict | None:
+def read_worker_state(lane: "str | None" = None) -> dict | None:
     """Best-effort worker liveness snapshot; None when Redis is unreachable.
 
-    Returns ``{"alive": bool, "alive_age_s": float | None, "started_at": str | None,
+    ``lane`` selects whose signals to read: ``"fast"``/``"slow"`` for the
+    lane workers, ``""`` for the legacy un-suffixed keys, ``None`` (default)
+    for this process's own lane. Returns ``{"alive": bool,
+    "alive_age_s": float | None, "started_at": str | None,
     "current_task": dict | None, "last_task": dict | None}``.
     """
     try:
         client = _redis_client()
         try:
             alive_age = None
-            raw = client.get(WORKER_ALIVE_KEY)
+            raw = client.get(_key(WORKER_ALIVE_KEY, lane))
             ts = _parse_iso(raw) if raw else None
             if ts is not None:
                 alive_age = (_utcnow() - ts).total_seconds()
             return {
                 "alive": alive_age is not None and alive_age < WORKER_ALIVE_STALE_AFTER_SECONDS,
                 "alive_age_s": alive_age,
-                "started_at": client.get(WORKER_STARTED_AT_KEY),
-                "current_task": _json_get(client, WORKER_CURRENT_TASK_KEY),
-                "last_task": _json_get(client, WORKER_LAST_TASK_KEY),
+                "started_at": client.get(_key(WORKER_STARTED_AT_KEY, lane)),
+                "current_task": _json_get(client, _key(WORKER_CURRENT_TASK_KEY, lane)),
+                "last_task": _json_get(client, _key(WORKER_LAST_TASK_KEY, lane)),
             }
         finally:
             client.close()
     except Exception:  # noqa: BLE001 — liveness introspection must never raise
         return None
+
+
+def own_lane_alive(max_age_s: int = WORKER_ALIVE_STALE_AFTER_SECONDS) -> bool:
+    """True when this process's lane has a fresh alive key in Redis.
+
+    Used by the container healthcheck (docker-compose.yml): unlike
+    ``inspect().ping()``, the alive key is refreshed by a daemon thread
+    every 15s, so it stays fresh while the solo pool is blocked inside a
+    long task — no flapping to "unhealthy" mid-render.
+    """
+    try:
+        client = _redis_client()
+        try:
+            raw = client.get(_key(WORKER_ALIVE_KEY))
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001 — healthcheck helper must never raise
+        return False
+    ts = _parse_iso(raw) if raw else None
+    if ts is None:
+        return False
+    return (_utcnow() - ts).total_seconds() < max_age_s
 
 
 def _record_task_start(sender=None, task=None, task_id=None, **kwargs) -> None:
@@ -215,7 +274,7 @@ def _record_task_start(sender=None, task=None, task_id=None, **kwargs) -> None:
         client = _redis_client()
         try:
             client.set(
-                WORKER_CURRENT_TASK_KEY,
+                _key(WORKER_CURRENT_TASK_KEY),
                 json.dumps(
                     {
                         "task": name,
@@ -237,10 +296,10 @@ def _record_task_end(sender=None, task=None, task_id=None, **kwargs) -> None:
     try:
         client = _redis_client()
         try:
-            cur = _json_get(client, WORKER_CURRENT_TASK_KEY)
-            client.delete(WORKER_CURRENT_TASK_KEY)
+            cur = _json_get(client, _key(WORKER_CURRENT_TASK_KEY))
+            client.delete(_key(WORKER_CURRENT_TASK_KEY))
             client.set(
-                WORKER_LAST_TASK_KEY,
+                _key(WORKER_LAST_TASK_KEY),
                 json.dumps(
                     {
                         "task": name,
@@ -261,12 +320,13 @@ _stop_event = threading.Event()
 
 def _alive_loop() -> None:
     client = None
+    alive_key = _key(WORKER_ALIVE_KEY)
     while not _stop_event.wait(WORKER_ALIVE_INTERVAL_SECONDS):
         try:
             if client is None:
                 client = _redis_client()
             client.set(
-                WORKER_ALIVE_KEY,
+                alive_key,
                 _utcnow().isoformat(),
                 ex=WORKER_ALIVE_STALE_AFTER_SECONDS,
             )
@@ -290,7 +350,7 @@ def _start_alive_thread(**kwargs) -> None:
     try:
         client = _redis_client()
         try:
-            client.set(WORKER_STARTED_AT_KEY, _utcnow().isoformat(), ex=WORKER_STARTED_AT_TTL)
+            client.set(_key(WORKER_STARTED_AT_KEY), _utcnow().isoformat(), ex=WORKER_STARTED_AT_TTL)
         finally:
             client.close()
     except Exception:  # noqa: BLE001

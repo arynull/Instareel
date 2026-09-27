@@ -19,6 +19,8 @@ const ICONS: Record<string, typeof Database> = {
   database: Database,
   redis: Radio,
   celery_worker: Cog,
+  celery_worker_fast: Cog,
+  celery_worker_slow: Cog,
   celery_beat: Timer,
   instagram: Instagram,
   proxies: Globe,

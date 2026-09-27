@@ -39,16 +39,34 @@ WATCHDOG_GAP_FACTOR = 3
 
 
 def _watchdog_checks():
-    """Critical checks the watchdog runs — everything except the worker.
+    """Critical checks the watchdog runs — everything except the worker lanes.
 
-    The watchdog executes on the worker itself, and under the solo pool the
-    worker's MainProcess is blocked running this task, so it can never
-    answer its own inspect().ping(). The /system/health endpoint still
-    checks the worker from the backend.
+    The watchdog executes on the fast-lane worker itself, and under the solo
+    pool the worker's MainProcess is blocked running this task, so it can
+    never answer its own inspect().ping() — including the fast-lane check
+    here would raise a spurious "Celery worker (fast lane) down" critical
+    notification every 2 minutes (and burn the 5s ping timeout each time).
+    The /system/health endpoint still checks both lanes from the backend,
+    and system_watchdog() monitors the *slow* lane separately below (a
+    ping from the fast worker does reach the slow worker).
     """
     from app.services.health_checks import CRITICAL_CHECKS
 
-    return [c for c in CRITICAL_CHECKS if c[0] != "celery_worker"]
+    return [c for c in CRITICAL_CHECKS if not c[0].startswith("celery_worker")]
+
+
+def _slow_lane_watch():
+    """("celery_worker_slow", label, check) when this process runs the fast
+    lane (a ping sent from the fast worker reaches the slow one), else None.
+    Gated on WORKER_LANE: in a single-worker (pre-lane) deployment there is
+    no slow lane to watch."""
+    import os as _os
+
+    if _os.environ.get("WORKER_LANE") != "fast":
+        return None
+    from app.services.health_checks import check_worker_slow_sync
+
+    return ("celery_worker_slow", "Celery worker (slow lane)", check_worker_slow_sync)
 
 
 def _busy_task_during_gap(last_run: dt.datetime) -> str | None:
@@ -72,10 +90,11 @@ def _describe_busy_task(task_name: str) -> str:
 def system_watchdog():
     """Turn critical-component state CHANGES into dashboard notifications.
 
-    Runs every WATCHDOG_INTERVAL_MINUTES on the worker. For each critical
-    component except the Celery worker itself — database, Redis, Celery
-    beat — (the worker can't ping itself under the solo pool; /system/health
-    covers it from the backend):
+    Runs every WATCHDOG_INTERVAL_MINUTES on the fast-lane worker. For each
+    critical component except the fast worker lane itself — database, Redis,
+    Celery beat, and (in lane deployments) the slow worker lane — (the
+    worker can't ping itself under the solo pool; /system/health covers the
+    fast lane from the backend):
     - down, with no unread "down" notification -> one critical notification
       (dedup_key ``watchdog:{name}:down`` fires exactly once per outage);
     - back up while an unread "down" notification exists -> the down
@@ -103,11 +122,18 @@ def system_watchdog():
 
     # The watchdog runs ON the worker, and the worker uses the solo pool:
     # its MainProcess is blocked executing this very task, so it can never
-    # answer its own inspect().ping() — including the worker check here
-    # would raise a spurious "Celery worker down" critical notification
-    # every 2 minutes (and burn the 5s ping timeout each time). The
-    # /system/health endpoint still pings the worker from the backend.
+    # answer its own inspect().ping() — including the fast-lane worker check
+    # here would raise a spurious "Celery worker (fast lane) down" critical
+    # notification every 2 minutes (and burn the 5s ping timeout each time).
+    # The /system/health endpoint still checks both lanes from the backend.
     checks = _watchdog_checks()
+
+    # ...except the SLOW lane: a ping sent from the fast worker does reach
+    # the slow worker, so the watchdog can watch it. A dead slow lane means
+    # videos silently stop processing/uploading — worth a critical alert.
+    slow_watch = _slow_lane_watch()
+    if slow_watch is not None:
+        checks.append(slow_watch)
 
     try:
         now = _dt.datetime.now(_dt.timezone.utc)

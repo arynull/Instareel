@@ -7,6 +7,39 @@ from celery.schedules import crontab
 from app.config import settings
 
 celery = Celery("igfunnel", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
+
+#: Task lanes. Every worker runs ``--pool=solo``, i.e. one process executes a
+#: single task at a time. Without lanes, a 10-minute FFmpeg render (or a slow
+#: reel upload) stalls the per-minute scheduler ticks queued behind it —
+#: posts go out late and the watchdog sees phantom "Scheduler was down"
+#: gaps. Two queues fix that at the architecture level:
+#:
+#: - ``fast``: time-sensitive ticks that must never wait (scheduler,
+#:   watchdog, heartbeats, proxy checks, cleanup).
+#: - ``slow``: long-running jobs (video processing, uploads, ingest,
+#:   analytics sweeps).
+#:
+#: Each queue is consumed by its own worker process (docker-compose.yml:
+#: ``worker-fast`` / ``worker-slow``). On a 1-vCPU box the two processes
+#: still time-share the CPU, but the OS scheduler keeps the fast lane
+#: responsive while the slow lane renders — a stuck FFmpeg job can no
+#: longer silence the scheduler.
+TASK_FAST_QUEUE = "fast"
+TASK_SLOW_QUEUE = "slow"
+
+#: Tasks routed to the slow lane. Everything else (including every beat
+#: tick) stays on the fast lane via ``task_default_queue``. Beat-published
+#: and ``.delay()``-published tasks both go through this router, so call
+#: sites need no changes.
+SLOW_TASKS = frozenset(
+    {
+        "tasks.video_tasks.process_video",  # FFmpeg renders: minutes each
+        "tasks.post_tasks.execute_post",  # reel upload: ~6 min blocking
+        "tasks.source_tasks.ingest_source",  # paginated IG listing
+        "tasks.analytics_tasks.fetch_all_analytics",  # ~75s per post sweep
+    }
+)
+
 celery.conf.update(
     task_serializer="json",
     accept_content=["json"],
@@ -17,6 +50,12 @@ celery.conf.update(
     enable_utc=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    # Lane routing (see above). The default queue must exist as a worker
+    # target: worker-fast consumes it, and a lone local-dev worker should
+    # run with ``-Q fast,slow`` to drain both. (No explicit task_queues:
+    # the Redis broker auto-creates queues on first publish.)
+    task_default_queue=TASK_FAST_QUEUE,
+    task_routes={name: {"queue": TASK_SLOW_QUEUE} for name in SLOW_TASKS},
 )
 celery.autodiscover_tasks(["app.tasks"])
 
@@ -34,6 +73,9 @@ celery.conf.beat_schedule = {
     # Fail posts wedged in 'posting' (worker died mid-upload) before they can
     # silently wedge or double-post via the stale-sibling window.
     "reap-stale-posting": {"task": "tasks.post_tasks.reap_stale_posting", "schedule": crontab(minute="*/10")},
+    # Shadowban / action-block watch: views-collapse heuristic per account
+    # (fast lane — a short DB scan, no IG calls).
+    "shadowban-scan": {"task": "tasks.account_tasks.scan_shadowban", "schedule": crontab(hour="*/6", minute=23)},
 }
 
 # Explicit imports so workers always register tasks (autodiscover is

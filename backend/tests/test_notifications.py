@@ -371,14 +371,18 @@ def test_post_age_hours_handles_naive_db_timestamp():
 
 
 def test_watchdog_skips_self_worker_check():
-    """The watchdog runs ON the worker; under the solo pool the worker can
-    never answer its own inspect().ping(), so including the worker check
-    would emit a spurious 'Celery worker down' critical notification every
-    2 minutes. /system/health (backend) still covers the worker."""
+    """The watchdog runs ON the fast-lane worker; under the solo pool the
+    worker can never answer its own inspect().ping(), so including either
+    worker-lane check would emit a spurious 'Celery worker down' critical
+    notification every 2 minutes. /system/health (backend) still covers both
+    lanes, and the watchdog monitors the *slow* lane separately via
+    _slow_lane_watch()."""
     from app.services.health_checks import CRITICAL_CHECKS
     from app.tasks.health_tasks import _watchdog_checks
 
     names = [c[0] for c in _watchdog_checks()]
-    assert "celery_worker" not in names
-    assert "celery_worker" in [c[0] for c in CRITICAL_CHECKS]
+    assert not any(n.startswith("celery_worker") for n in names)
+    critical_names = [c[0] for c in CRITICAL_CHECKS]
+    assert "celery_worker_fast" in critical_names
+    assert "celery_worker_slow" in critical_names
     assert set(names) == {"database", "redis", "celery_beat"}
