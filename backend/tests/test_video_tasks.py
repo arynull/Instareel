@@ -307,3 +307,99 @@ def test_ensure_disk_space_refuses(tmp_path, monkeypatch):
 class _Usage:
     def __init__(self, free):
         self.free = free
+
+
+# ---- preclaimed: manual Process/Reprocess during a Redis outage ----
+
+
+def _redis_down(monkeypatch):
+    """Simulate a Redis outage: every client construction raises."""
+
+    def _raise():
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(video_tasks, "_redis_client", _raise)
+    monkeypatch.setattr(video_tasks, "_acquire_process_lock", lambda vid: ("tok", False))
+
+
+def _drive_task(monkeypatch, db, vid, preclaimed):
+    """Run the task end-to-end with fake FFmpeg; returns (result, calls)."""
+    calls = []
+
+    def _fake_process(vid_arg, *a, **k):
+        calls.append(vid_arg)
+        with db() as s:
+            s.get(Video, vid_arg).status = VideoStatus.processed
+            s.commit()
+
+    monkeypatch.setattr("app.services.video_processor.process_video_sync", _fake_process)
+    monkeypatch.setattr("app.tasks.sync_helpers.resolve_audio", lambda s, name: None)
+    monkeypatch.setattr("app.tasks.sync_helpers.pick_audio", lambda s: None)
+    monkeypatch.setattr("app.tasks.sync_helpers.publish_sync", lambda *a, **k: None)
+    monkeypatch.setattr("app.tasks.sync_helpers.log_event_sync", lambda *a, **k: None)
+    monkeypatch.setattr(video_tasks, "_ensure_disk_space", lambda p: None)
+    result = video_tasks.process_video_task.run(vid, "", preclaimed=preclaimed)
+    return result, calls
+
+
+def test_preclaimed_task_processes_during_redis_outage(db, monkeypatch):
+    """The manual-Process wedge: API pre-flipped to processing, Redis down.
+
+    Without preclaimed the task would skip and the video would sit in
+    ``processing`` forever (retry then 409s — the 409 guard is fail-closed
+    on Redis outage).
+    """
+    vid = _make_video(db, VideoStatus.processing)  # the API pre-flip
+    _redis_down(monkeypatch)
+    result, calls = _drive_task(monkeypatch, db, vid, preclaimed=True)
+    assert result["status"] == "processed"
+    assert calls == [vid]
+    assert _status_of(db, vid) == VideoStatus.processed
+
+
+def test_unpreclaimed_task_still_skips_during_redis_outage(db, fake_redis, monkeypatch):
+    """Auto-queued paths must NOT steal a processing claim they can't verify."""
+    vid = _make_video(db, VideoStatus.processing)
+    _redis_down(monkeypatch)
+    result, calls = _drive_task(monkeypatch, db, vid, preclaimed=False)
+    assert result["status"] == "skipped"
+    assert result["reason"] == "already processing"
+    assert calls == []
+    assert _status_of(db, vid) == VideoStatus.processing
+
+
+def test_preclaimed_duplicate_after_completion_skips(db, fake_redis, monkeypatch):
+    """preclaimed must not resurrect a finished video (late duplicate delivery)."""
+    vid = _make_video(db, VideoStatus.processed)
+
+    def _boom(*a, **k):
+        raise AssertionError("FFmpeg must not run for an already-processed video")
+
+    monkeypatch.setattr("app.services.video_processor.process_video_sync", _boom)
+    monkeypatch.setattr("app.tasks.sync_helpers.resolve_audio", lambda s, name: None)
+    monkeypatch.setattr("app.tasks.sync_helpers.pick_audio", lambda s: None)
+    monkeypatch.setattr("app.tasks.sync_helpers.publish_sync", lambda *a, **k: None)
+    monkeypatch.setattr("app.tasks.sync_helpers.log_event_sync", lambda *a, **k: None)
+    monkeypatch.setattr(video_tasks, "_ensure_disk_space", lambda p: None)
+    result = video_tasks.process_video_task.run(vid, "", preclaimed=True)
+    assert result["status"] == "skipped"
+    assert result["reason"] == "already processed"
+
+
+def test_claim_preclaimed_unit(db):
+    """_claim_for_processing honors preclaimed without a verified lock."""
+    import uuid
+
+    vid = _make_video(db, VideoStatus.processing)
+    assert _claim_for_processing(vid, False, preclaimed=True) == "process"
+    with db() as s:
+        v = Video(
+            original_filename="t2.mp4",
+            raw_path="/tmp/raw-t2.mp4",
+            md5_hash="u" + uuid.uuid4().hex,
+            status=VideoStatus.processing,
+        )
+        s.add(v)
+        s.commit()
+        vid2 = v.id
+    assert _claim_for_processing(vid2, False, preclaimed=False) == "skip_active"

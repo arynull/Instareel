@@ -272,7 +272,7 @@ async def trigger_process(request: Request, video_id: int, _: str = Depends(get_
     v.failed_reason = None
     await db.commit()
     try:
-        process_video_task.delay(video_id, "")
+        process_video_task.delay(video_id, "", preclaimed=True)
     except Exception:
         # Broker unreachable: roll back so the video isn't wedged in
         # "processing" forever — the user can retry.
@@ -297,7 +297,7 @@ async def reprocess(request: Request, video_id: int, _: str = Depends(get_curren
     v.failed_reason = None
     await db.commit()
     try:
-        process_video_task.delay(video_id, "")
+        process_video_task.delay(video_id, "", preclaimed=True)
     except Exception:
         v.status = prev_status
         await db.commit()

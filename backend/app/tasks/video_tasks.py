@@ -16,13 +16,15 @@ Concurrency contract (single-flight + idempotent claim):
   one run may move the video into ``processing``. A run that finds the
   video already ``processed`` skips (post-completion duplicate task);
   ``processing`` + a lock we verifiably hold means the previous holder
-  died after claiming (or the API pre-flipped the status for this run) —
-  safe to reclaim. ``processing`` + an unverified (fail-open) lock is
-  never stolen.
+  died after claiming — safe to reclaim. ``processing`` + an unverified
+  (fail-open) lock is never stolen, *unless* this very task was queued
+  with ``preclaimed=True``: the API flipped the status in the same
+  request, so the claim is provably ours even when Redis is down (without
+  this, a Redis outage would wedge the video in ``processing`` forever).
 - The API pre-flips the status to ``processing`` before queueing so the
   dashboard shows progress immediately; its 409 guard consults the lock
-  (``process_lock_held``) so a *stale* processing claim doesn't wedge the
-  video forever — the user can retry once the lock TTL expires.
+  (``process_lock_held``, fail-closed on Redis outage) so a genuinely
+  live claim can never be pre-flipped over.
 """
 import logging
 import os
@@ -150,22 +152,32 @@ def _start_lock_refresher(video_id: int, token: str, stop_event: threading.Event
     return t
 
 
-def _claim_for_processing(video_id: int, lock_verified: bool) -> str:
+def _claim_for_processing(video_id: int, lock_verified: bool, preclaimed: bool = False) -> str:
     """Decide whether this run should transcode the video.
+
+    ``preclaimed`` is True only when the API flipped this video to
+    ``processing`` in the same request that queued this task (manual
+    Process/Reprocess). Then the ``processing`` row is *ours* even when the
+    lock is unverified (Redis outage) — without this, the task would skip
+    and the video would wedge in ``processing`` forever (retry then 409s,
+    because the 409 guard is fail-closed on Redis outage). It is safe: the
+    409 guard only lets the API flip+queue when no live lock exists, so a
+    genuinely-working run cannot be holding the claim at flip time.
 
     Returns one of:
 
     - ``"process"`` — claimed (``uploaded``/``failed`` → ``processing``),
       or reclaimed a stale ``processing`` claim while verifiably holding
-      the lock (previous holder died after claiming, or the API
-      pre-flipped the status for this very run).
+      the lock (previous holder died after claiming), or the
+      API-pre-flipped one (``preclaimed``).
     - ``"skip_processed"`` — already ``processed`` (duplicate task queued
       after completion); transcoding again would waste CPU and churn
       files. Reprocessing goes through the API, which flips the status
       first.
     - ``"skip_active"`` — ``posting``/``posted``/``archived`` (not our
-      business), or ``processing`` with an *unverified* (fail-open) lock:
-      another run may genuinely be working, never steal it.
+      business), or ``processing`` with an *unverified* (fail-open) lock
+      that we did NOT pre-claim: another run may genuinely be working,
+      never steal it.
     - ``"gone"`` — the video row no longer exists.
     """
     from sqlalchemy import update
@@ -181,13 +193,13 @@ def _claim_for_processing(video_id: int, lock_verified: bool) -> str:
             return "skip_processed"
         if v.status in (VideoStatus.posting, VideoStatus.posted, VideoStatus.archived):
             return "skip_active"
-        if v.status == VideoStatus.processing and not lock_verified:
+        if v.status == VideoStatus.processing and not lock_verified and not preclaimed:
             return "skip_active"
         # Atomic claim: only a row still in a claimable state flips. The
         # read above is just for the skip reason; this conditional UPDATE
         # is the real mutual exclusion (besides the Redis lock).
         claimable = [VideoStatus.uploaded, VideoStatus.failed]
-        if lock_verified:
+        if lock_verified or preclaimed:
             # Reclaim a stale processing row, or the API-pre-flipped one.
             claimable.append(VideoStatus.processing)
         n = s.execute(
@@ -232,7 +244,7 @@ def _ensure_disk_space(raw_path: str | None) -> None:
 
 
 @celery.task(name="tasks.video_tasks.process_video", bind=True, max_retries=2)
-def process_video_task(self, video_id: int, effect_filter: str = "", color_grade: str = ""):
+def process_video_task(self, video_id: int, effect_filter: str = "", color_grade: str = "", preclaimed: bool = False):
     import datetime as dt
 
     from sqlalchemy import select
@@ -270,7 +282,7 @@ def process_video_task(self, video_id: int, effect_filter: str = "", color_grade
             _start_lock_refresher(video_id, token, stop_refresh)
         try:
             # Idempotent claim: exactly one run may own the transcode.
-            decision = _claim_for_processing(video_id, lock_verified)
+            decision = _claim_for_processing(video_id, lock_verified, preclaimed)
             if decision == "gone":
                 log.warning("Video %s no longer exists — skipping", video_id)
                 return {"video_id": video_id, "status": "skipped", "reason": "video not found"}
