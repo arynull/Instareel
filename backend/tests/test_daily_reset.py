@@ -89,3 +89,33 @@ def test_reset_task_returns_status(maker):
     _account(maker, posts_today=1)
     assert reset_daily_counts() == {"ok": True, "reset": True}
     assert reset_daily_counts() == {"ok": True, "reset": False}
+
+
+def test_concurrent_callers_reset_exactly_once(maker):
+    """Two threads racing the first reset: exactly one performs it.
+
+    The stamp flip is a single conditional UPDATE, so the loser sees
+    rowcount 0 (or loses the first-run PK insert) and returns False.
+    """
+    import threading
+
+    _account(maker, posts_today=3)
+    barrier = threading.Barrier(2)
+    results = []
+
+    def _call():
+        barrier.wait()
+        results.append(ensure_daily_counts_reset())
+
+    threads = [threading.Thread(target=_call) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(results) == [False, True]
+    with maker() as s:
+        acc = s.query(Account).one()
+        assert acc.posts_today == 0
+        row = s.get(Setting, DAILY_RESET_DATE_KEY)
+        assert row is not None and row.value

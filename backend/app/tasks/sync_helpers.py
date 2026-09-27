@@ -82,8 +82,15 @@ def ensure_daily_counts_reset() -> bool:
     (the midnight task, or the per-minute scheduler as a backstop) performs
     it exactly once per local day, catching up a missed midnight on the
     next run. Returns True when it actually reset.
+
+    Concurrency: the stamp flip is a single conditional UPDATE, so even if
+    two callers race (impossible with the production --pool=solo worker, but
+    cheap to guarantee), exactly one of them performs the reset — the loser
+    sees rowcount 0. The reset itself (posts_today=0) is naturally
+    idempotent anyway; the atomic claim additionally prevents a duplicate
+    "reset" log line.
     """
-    from sqlalchemy import update
+    from sqlalchemy import or_, update
 
     from app.database import SyncSessionLocal
     from app.models import Account, Setting
@@ -91,17 +98,26 @@ def ensure_daily_counts_reset() -> bool:
     today = _schedule_now().date().isoformat()
     try:
         with SyncSessionLocal() as s:
-            row = s.get(Setting, DAILY_RESET_DATE_KEY)
-            if row is not None and row.value == today:
-                return False
-            s.execute(update(Account).values(posts_today=0))
-            if row is None:
+            claimed = s.execute(
+                update(Setting)
+                .where(
+                    Setting.key == DAILY_RESET_DATE_KEY,
+                    or_(Setting.value.is_(None), Setting.value != today),
+                )
+                .values(value=today)
+            ).rowcount
+            if not claimed and s.get(Setting, DAILY_RESET_DATE_KEY) is None:
+                # First run ever: no stamp row to flip — create it and reset.
+                # A concurrent first-run loses the PK insert; the winner's
+                # reset stands and the loser just returns False.
                 s.add(Setting(key=DAILY_RESET_DATE_KEY, value=today, category="system"))
-            else:
-                row.value = today
-            s.commit()
-        log_event_sync("INFO", "system", f"Daily post counts reset ({today})")
-        return True
+                claimed = 1
+            if claimed:
+                s.execute(update(Account).values(posts_today=0))
+                s.commit()
+                log_event_sync("INFO", "system", f"Daily post counts reset ({today})")
+                return True
+            return False
     except Exception:  # noqa: BLE001
         log.exception("ensure_daily_counts_reset failed")
         return False
