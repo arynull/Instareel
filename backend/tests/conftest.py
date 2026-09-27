@@ -17,6 +17,10 @@ os.environ.setdefault("SYNC_DATABASE_URL", "sqlite://")
 # fixed test values so validate_security() never trips here.
 os.environ.setdefault("SECRET_KEY", "test-suite-only-secret-key-not-for-production")
 os.environ.setdefault("ADMIN_PASSWORD", "test-suite-only-admin-password")
+# The global rate-limit default (200/min per IP in production) would trip on
+# the suite's request volume from a single TestClient IP; per-endpoint limits
+# (e.g. login brute-force) stay active and are still tested.
+os.environ.setdefault("RATE_LIMIT_DEFAULT", "")
 
 
 class _FakeRedis:
@@ -55,6 +59,25 @@ class _FakeRedis:
         return 1
 
     async def aclose(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit_buckets():
+    """Isolate slowapi's in-memory buckets per test.
+
+    The suite fires hundreds of requests from one TestClient IP; without a
+    reset, the per-route login limit (5/min, a production brute-force guard)
+    leaks across tests and makes unrelated logins flake with 429.
+    Within a single test the limits still apply (test_login_brute_force_trips_429
+    relies on that).
+    """
+    yield
+    from app.api.deps import limiter
+
+    try:
+        limiter._storage.reset()
+    except Exception:
         pass
 
 

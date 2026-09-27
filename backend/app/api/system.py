@@ -399,12 +399,36 @@ MASKED = "••••••••"
 
 @settings_router.get("", response_model=list[SettingOut])
 async def list_settings(_: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
-    for key, (val, cat) in DEFAULT_SETTINGS.items():
-        if not await db.get(Setting, key):
-            db.add(Setting(key=key, value=val, category=cat))
-    await db.commit()
+    # Read-only: the seeding write that used to live here moved to startup.
+    # Defaults for never-persisted keys are overlaid so the contract is
+    # unchanged even if seeding didn't run.
     rows = (await db.execute(select(Setting).order_by(Setting.category, Setting.key))).scalars().all()
-    return [SettingOut(key=s.key, value=(MASKED if s.is_sensitive and s.value else s.value), category=s.category, is_sensitive=s.is_sensitive) for s in rows]
+    have = {s.key for s in rows}
+    out = [
+        SettingOut(key=s.key, value=(MASKED if s.is_sensitive and s.value else s.value),
+                   category=s.category, is_sensitive=s.is_sensitive)
+        for s in rows
+    ]
+    for key, (val, cat) in DEFAULT_SETTINGS.items():
+        if key not in have:
+            out.append(SettingOut(key=key, value=val, category=cat, is_sensitive=False))
+    out.sort(key=lambda s: (s.category, s.key))
+    return out
+
+
+async def seed_default_settings() -> int:
+    """Insert missing DEFAULT_SETTINGS rows. Runs once at startup (not in
+    GET) — idempotent, safe to call on every boot."""
+    from app.database import SessionLocal
+
+    added = 0
+    async with SessionLocal() as db:
+        for key, (val, cat) in DEFAULT_SETTINGS.items():
+            if not await db.get(Setting, key):
+                db.add(Setting(key=key, value=val, category=cat))
+                added += 1
+        await db.commit()
+    return added
 
 
 @settings_router.put("/{key}", response_model=SettingOut, status_code=200)

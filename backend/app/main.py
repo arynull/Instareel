@@ -1,6 +1,7 @@
 """FastAPI entrypoint: middleware, error envelope, health, routers, startup init."""
 import logging
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -18,6 +19,25 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 log = logging.getLogger("igfunnel")
 
 
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    # Fail closed: default/empty SECRET_KEY lets anyone forge admin JWTs,
+    # and default/empty admin credentials let anyone log in.
+    settings.validate_security()
+    os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
+    for sub in ("raw", "processed", "thumbnails", "sessions", "audio", "profile_pics"):
+        os.makedirs(os.path.join(settings.MEDIA_ROOT, sub), exist_ok=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    from app.api.system import seed_default_settings
+
+    n = await seed_default_settings()
+    if n:
+        log.info("Seeded %d default settings", n)
+    log.info("IG Funnel API ready (env=%s)", settings.ENV)
+    yield
+
+
 def create_app() -> FastAPI:
     """App factory — lets tests build variants (e.g. docs on/off) without
     re-importing the module."""
@@ -28,6 +48,7 @@ def create_app() -> FastAPI:
         docs_url="/docs" if docs else None,
         redoc_url="/redoc" if docs else None,
         openapi_url="/openapi.json" if docs else None,
+        lifespan=lifespan,
     )
     application.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     setup_middleware(application, limiter)
@@ -45,18 +66,6 @@ def create_app() -> FastAPI:
 
     application.include_router(router)
     application.include_router(ws_mount)
-
-    @application.on_event("startup")
-    async def startup():
-        # Fail closed: default/empty SECRET_KEY lets anyone forge admin JWTs,
-        # and default/empty admin credentials let anyone log in.
-        settings.validate_security()
-        os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
-        for sub in ("raw", "processed", "thumbnails", "sessions", "audio", "profile_pics"):
-            os.makedirs(os.path.join(settings.MEDIA_ROOT, sub), exist_ok=True)
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        log.info("IG Funnel API ready (env=%s)", settings.ENV)
 
     return application
 
