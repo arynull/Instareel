@@ -192,6 +192,46 @@ def test_busy_gap_task_finished_inside_gap(fake_redis):
     )
 
 
+def test_busy_gap_task_started_after_last_run_still_running(fake_redis):
+    # The common case the old `started <= last_run` check missed: the task
+    # began after the last watchdog run and is still executing — the gap is
+    # explained (watchdog queued behind the solo-pool worker), no matter
+    # when the task started.
+    now = _now()
+    _set_alive(fake_redis, 5)
+    fake_redis.set(
+        worker_signals.WORKER_CURRENT_TASK_KEY,
+        json.dumps(
+            {
+                "task": "tasks.post_tasks.execute_post",
+                "started_at": (now - dt.timedelta(minutes=3)).isoformat(),
+            }
+        ),
+    )
+    assert (
+        worker_signals.busy_task_during_gap(now - dt.timedelta(minutes=10))
+        == "tasks.post_tasks.execute_post"
+    )
+
+
+def test_busy_gap_watchdog_itself_does_not_explain_gap(fake_redis):
+    # task_prerun records the watchdog as the current task before its body
+    # runs — but the gap IS the watchdog not running, so itself must never
+    # count as the explaining task (otherwise every genuine outage would
+    # report "Worker was busy running the watchdog").
+    now = _now()
+    fake_redis.set(
+        worker_signals.WORKER_CURRENT_TASK_KEY,
+        json.dumps(
+            {
+                "task": "tasks.health_tasks.system_watchdog",
+                "started_at": now.isoformat(),
+            }
+        ),
+    )
+    assert worker_signals.busy_task_during_gap(now - dt.timedelta(minutes=10)) is None
+
+
 def test_busy_gap_genuine_outage_returns_none(fake_redis):
     now = _now()
     _set_alive(fake_redis, 5)

@@ -24,7 +24,10 @@ NEAR_DUP_THRESHOLD = 8
 def dhash_hex(img) -> str:
     """64-bit difference hash of a Pillow image → 16 hex chars."""
     g = img.convert("L").resize((9, 8))
-    px = list(g.getdata())
+    # get_flattened_data() replaced the deprecated Image.getdata() in
+    # Pillow 12 (removal in 14); fall back for older Pillows.
+    flat = getattr(g, "get_flattened_data", None)
+    px = list(flat()) if flat is not None else list(g.getdata())
     bits = 0
     for y in range(8):
         for x in range(8):

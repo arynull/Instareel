@@ -1010,6 +1010,11 @@ async def upload_audio(
         if os.path.exists(raw_path):
             os.remove(raw_path)
         raise
+    except Exception:
+        # Disk error mid-stream etc. — never orphan the partial file.
+        if os.path.exists(raw_path):
+            os.remove(raw_path)
+        raise
     finally:
         try:
             await file.close()

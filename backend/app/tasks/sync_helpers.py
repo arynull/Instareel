@@ -779,6 +779,36 @@ def account_skip_reason(session, account_id: "int | None") -> str | None:
                 f"({acc.posts_today}/{cap} posted today){warm}"
             )
         return None  # eligible — shouldn't happen after a real skip
+    # No specific account: mirror eligible_account()'s no-account branch.
+    # The 2h spacing rule (last_post <= now - 2h) is part of it — without
+    # this, a slot skipped only because the account posted recently would
+    # misleadingly report "no remaining daily capacity".
+    wdays = warmup_days_setting(session)
+    spacing_blocked = None
+    for acc in session.execute(
+        select(Account)
+        .where(Account.status == AccountStatus.active)
+        .order_by(Account.last_post.asc().nulls_first())
+        .limit(500)
+    ).scalars().all():
+        cap = effective_max_posts(acc.created_at, acc.max_daily_posts, now, warmup_days=wdays)
+        if acc.posts_today >= cap:
+            continue
+        cd = as_aware_utc(acc.cooldown_until)
+        if cd and cd > now:
+            continue
+        lp = as_aware_utc(acc.last_post)
+        if lp and lp > now - dt.timedelta(hours=2):
+            spacing_blocked = acc
+            break
+        return None  # eligible — shouldn't happen after a real skip
+    if spacing_blocked is not None:
+        nxt = as_aware_utc(spacing_blocked.last_post) + dt.timedelta(hours=2)
+        mins = max(1, int((nxt - now).total_seconds() // 60))
+        return (
+            f"@{spacing_blocked.username} posted recently — next post allowed "
+            f"in ~{mins} min (2h spacing between posts)"
+        )
     return "no active account with remaining daily capacity"
 
 

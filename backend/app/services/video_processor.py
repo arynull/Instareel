@@ -124,7 +124,15 @@ async def extract_thumbnail(src: str, duration: float, dst: str) -> None:
         "ffmpeg", "-y", "-ss", str(at), "-i", src, "-frames:v", "1", "-q:v", "3", dst,
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
     )
-    await proc.communicate()
+    try:
+        await asyncio.wait_for(proc.communicate(), timeout=120)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        await proc.wait()
+        raise RuntimeError("ffmpeg thumbnail timed out after 120s")
 
 
 def extract_thumbnail_sync(src: str, duration: float, dst: str) -> None:
@@ -216,7 +224,16 @@ def process_video_sync(video_id: int, effect_filter: str = "", color_grade: str 
     def on_progress(pct: float, stage: str):
         set_progress_sync(video_id, 8 + pct * 0.85, stage)
 
-    ff.run_sync_with_progress(cmd, out_len or info["duration"], on_progress)
+    try:
+        ff.run_sync_with_progress(cmd, out_len or info["duration"], on_progress)
+    except Exception:
+        # A failed encode leaves a partial output — never orphan it.
+        try:
+            if os.path.exists(dst):
+                os.remove(dst)
+        except OSError:
+            pass
+        raise
 
     thumb_name = f"{uuid.uuid4().hex}.jpg"
     thumb_path = os.path.join(dirs["thumbnails"], thumb_name)
@@ -286,7 +303,16 @@ async def process_video(
     async def on_progress(pct: float, stage: str):
         await realtime.set_progress(video_id, 8 + pct * 0.85, stage)
 
-    await ff.run_with_progress(cmd, info["duration"], on_progress)
+    try:
+        await ff.run_with_progress(cmd, info["duration"], on_progress)
+    except Exception:
+        # A failed encode leaves a partial output — never orphan it.
+        try:
+            if os.path.exists(dst):
+                os.remove(dst)
+        except OSError:
+            pass
+        raise
 
     thumb_name = f"{uuid.uuid4().hex}.jpg"
     thumb_path = os.path.join(dirs["thumbnails"], thumb_name)

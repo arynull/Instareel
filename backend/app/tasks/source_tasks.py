@@ -261,67 +261,78 @@ def ingest_source(self, source_id: int):
                 Raises _Duplicate (→ item skipped) or ValueError (→ failed).
                 """
                 cover_path = _install_cover(cover_src, dirs) if source.with_covers else None
-                ext = os.path.splitext(got_path)[1].lower() or ".mp4"
-                if ext not in ALLOWED_EXT:
-                    raise ValueError(f"unsupported container {ext}")
-                size = os.path.getsize(got_path)
-                if size == 0:
-                    raise ValueError("empty download")
-                if size > max_bytes:
-                    raise ValueError(f"file exceeds {settings.MAX_UPLOAD_MB}MB limit")
-                dest = os.path.join(dirs["raw"], f"{uuid.uuid4().hex}{ext}")
-                shutil.move(got_path, dest)
-                for wd in work_dirs:
+                try:
+                    ext = os.path.splitext(got_path)[1].lower() or ".mp4"
+                    if ext not in ALLOWED_EXT:
+                        raise ValueError(f"unsupported container {ext}")
+                    size = os.path.getsize(got_path)
+                    if size == 0:
+                        raise ValueError("empty download")
+                    if size > max_bytes:
+                        raise ValueError(f"file exceeds {settings.MAX_UPLOAD_MB}MB limit")
+                    dest = os.path.join(dirs["raw"], f"{uuid.uuid4().hex}{ext}")
+                    shutil.move(got_path, dest)
+                    for wd in work_dirs:
+                        try:
+                            shutil.rmtree(wd, ignore_errors=True)
+                        except Exception:
+                            pass
+                    size, digest = _md5_of(dest)
+                    dup = s.execute(
+                        select(Video.id, Video.original_filename).where(Video.md5_hash == digest)
+                    ).first()
+                    if dup:
+                        os.remove(dest)
+                        raise _Duplicate(dup[0])
                     try:
-                        shutil.rmtree(wd, ignore_errors=True)
+                        probe = ff.probe_sync(dest)
                     except Exception:
-                        pass
-                size, digest = _md5_of(dest)
-                dup = s.execute(
-                    select(Video.id, Video.original_filename).where(Video.md5_hash == digest)
-                ).first()
-                if dup:
-                    os.remove(dest)
-                    raise _Duplicate(dup[0])
-                try:
-                    probe = ff.probe_sync(dest)
-                except Exception:
-                    os.remove(dest)
-                    raise ValueError("ffprobe validation failed")
-                # Visual + caption dedupe (best-effort): md5 above only
-                # catches byte-identical files; the same clip under a new
-                # media id / re-encode is caught here and skipped, never failed.
-                # A computed phash is kept even when the similarity lookup
-                # itself errors — the hash is still valid for future rows.
-                phash = None
-                try:
-                    phash = mh.frame_hash(dest)
-                except Exception:
+                        os.remove(dest)
+                        raise ValueError("ffprobe validation failed")
+                    # Visual + caption dedupe (best-effort): md5 above only
+                    # catches byte-identical files; the same clip under a new
+                    # media id / re-encode is caught here and skipped, never failed.
+                    # A computed phash is kept even when the similarity lookup
+                    # itself errors — the hash is still valid for future rows.
                     phash = None
-                if phash:
                     try:
-                        near = mh.find_near_duplicate(s, phash)
-                        if near is not None:
-                            os.remove(dest)
-                            raise _Duplicate(near.id, "visual hash")
-                        cap = mh.find_caption_duplicate(s, caption)
-                        if cap is not None:
-                            os.remove(dest)
-                            raise _Duplicate(cap.id, "same caption")
-                    except _Duplicate:
-                        raise
+                        phash = mh.frame_hash(dest)
                     except Exception:
-                        pass
-                video = Video(
-                    original_filename=fname, raw_path=dest,
-                    file_size=size, md5_hash=digest, phash=phash,
-                    duration=(probe or {}).get("duration"),
-                    custom_thumbnail_path=cover_path,
-                    source_caption=caption,
-                )
-                s.add(video)
-                s.flush()
-                return video.id
+                        phash = None
+                    if phash:
+                        try:
+                            near = mh.find_near_duplicate(s, phash)
+                            if near is not None:
+                                os.remove(dest)
+                                raise _Duplicate(near.id, "visual hash")
+                            cap = mh.find_caption_duplicate(s, caption)
+                            if cap is not None:
+                                os.remove(dest)
+                                raise _Duplicate(cap.id, "same caption")
+                        except _Duplicate:
+                            raise
+                        except Exception:
+                            pass
+                    video = Video(
+                        original_filename=fname, raw_path=dest,
+                        file_size=size, md5_hash=digest, phash=phash,
+                        duration=(probe or {}).get("duration"),
+                        custom_thumbnail_path=cover_path,
+                        source_caption=caption,
+                    )
+                    s.add(video)
+                    s.flush()
+                    return video.id
+                except Exception:
+                    # The cover was already moved into thumbnails/ — a later
+                    # dup/validation failure must not orphan it.
+                    if cover_path:
+                        try:
+                            if os.path.exists(cover_path):
+                                os.remove(cover_path)
+                        except OSError:
+                            pass
+                    raise
 
             def mark_downloaded(item, video_id, fname):
                 item.status = SourceItemStatus.downloaded

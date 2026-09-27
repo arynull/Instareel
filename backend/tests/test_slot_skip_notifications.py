@@ -110,6 +110,25 @@ def _freeze(monkeypatch, at):
     monkeypatch.setattr(sync_helpers, "_schedule_now", lambda: at)
 
 
+def _stamp_reset_today(factory):
+    """Pretend the midnight reset already ran today.
+
+    check_and_post's per-minute backstop (ensure_daily_counts_reset) zeroes
+    counters on a stamp-less DB; in production the stamp row always exists
+    by the time an account has posts_today > 0, so tests seeding a
+    same-day counter must replicate that.
+    """
+    with factory() as s:
+        s.add(
+            Setting(
+                key=sync_helpers.DAILY_RESET_DATE_KEY,
+                value=sync_helpers._schedule_now().date().isoformat(),
+                category="system",
+            )
+        )
+        s.commit()
+
+
 def _tick(factory, monkeypatch):
     fired = []
     monkeypatch.setattr(
@@ -144,6 +163,7 @@ def test_cap_skip_notifies_once_per_slot(factory, tmp_path, monkeypatch):
         n_videos=2, posts_today=1, account_age_days=3,  # warm-up: cap = 1/day
     )
     _freeze(monkeypatch, NOW)
+    _stamp_reset_today(factory)
     res, _ = _tick(factory, monkeypatch)
     assert res["slots_matched"] == 1
     assert res["created"] == 0
@@ -203,6 +223,21 @@ def test_account_skip_reason_none_when_eligible(factory, tmp_path):
     acc_id = _seed(factory, tmp_path, [], posts_today=0, account_age_days=30)
     with factory() as s:
         assert account_skip_reason(s, acc_id) is None
+
+
+def test_account_skip_reason_spacing_when_posted_recently(factory, tmp_path):
+    # No account pinned to the rule: the account has daily capacity left but
+    # posted 30 minutes ago, so eligible_account()'s 2h spacing rule skips
+    # the slot. The reason must say spacing, not "no daily capacity".
+    _seed(factory, tmp_path, [], posts_today=0, account_age_days=30)
+    with factory() as s:
+        acc = s.query(Account).one()
+        acc.last_post = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=30)
+        s.commit()
+        reason = account_skip_reason(s, None)
+    assert reason is not None
+    assert "2h spacing" in reason
+    assert "daily capacity" not in reason
 
 
 # ---- configurable warm-up ----

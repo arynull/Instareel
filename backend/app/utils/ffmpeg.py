@@ -66,7 +66,15 @@ async def probe(path: str) -> dict:
         *_probe_args(path),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    out, _ = await proc.communicate()
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        await proc.wait()
+        raise RuntimeError("ffprobe timed out after 60s")
     if proc.returncode != 0:
         raise RuntimeError("ffprobe failed — file is not a valid video")
     return _parse_probe_json(out)
@@ -249,21 +257,39 @@ def run_sync_with_progress(cmd: list[str], duration: float, on_progress) -> None
 
 
 async def run_with_progress(cmd: list[str], duration: float, on_progress) -> None:
-    """Run ffmpeg, parsing `time=` tokens from stderr to report 0-100%."""
+    """Run ffmpeg, parsing `time=` tokens from stderr to report 0-100%.
+
+    Bounded like run_sync_with_progress: a hung encode is killed after a
+    duration-scaled timeout so one bad file can never wedge the caller
+    forever.
+    """
     import asyncio
 
+    timeout = max(600.0, (duration or 0) * 10.0)
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
     )
     assert proc.stderr is not None
     stderr_tail: list[str] = []
-    async for raw in proc.stderr:
-        line = raw.decode(errors="replace").strip()
-        if line:
-            stderr_tail.append(line[-500:])
-            pct = _parse_time_token(line, duration)
-            if pct is not None:
-                await on_progress(pct, "processing")
-    await proc.wait()
+
+    async def _drain() -> None:
+        async for raw in proc.stderr:
+            line = raw.decode(errors="replace").strip()
+            if line:
+                stderr_tail.append(line[-500:])
+                pct = _parse_time_token(line, duration)
+                if pct is not None:
+                    await on_progress(pct, "processing")
+        await proc.wait()
+
+    try:
+        await asyncio.wait_for(_drain(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        await proc.wait()
+        raise RuntimeError(f"FFmpeg timed out after {timeout:.0f}s")
     if proc.returncode != 0:
         raise RuntimeError("FFmpeg failed: " + " | ".join(stderr_tail[-25:]))

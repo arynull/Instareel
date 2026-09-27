@@ -429,3 +429,59 @@ class TestFreshBugRegressions:
 
         assert env.get_source(sid).status == SourceStatus.idle
         assert env.video_count() == 1
+
+
+class TestOrphanCleanup:
+    def test_failed_download_does_not_orphan_cover(self, env, monkeypatch, tmp_path):
+        """finalize() installs the cover into thumbnails/ first; when the
+        video then fails validation (here: empty download), the cover must
+        be removed too — not orphaned."""
+        import app.services.anon_ingest as anon_mod
+
+        entries = [{
+            "shortcode": "orphan1",
+            "is_video": True,
+            "product_type": "clips",
+            "caption": "some caption",
+        }]
+        monkeypatch.setattr(
+            anon_mod, "list_public_posts", lambda *a, **k: (entries, None))
+
+        def _fake_download(shortcode, dest_dir, **kw):
+            v = tmp_path / "dl_v.mp4"
+            v.write_bytes(b"")  # empty -> finalize raises ValueError
+            c = tmp_path / "dl_c.jpg"
+            c.write_bytes(b"FAKECOVER")
+            return ({"video": str(v), "cover": str(c), "caption": "cap"}, None)
+
+        monkeypatch.setattr(anon_mod, "download_post", _fake_download)
+
+        # with_covers=True so finalize() installs the cover before failing
+        maker = env._maker
+        from app.models import SourceStatus, VideoSource
+        s = maker()
+        src = VideoSource(
+            username="somepage", status=SourceStatus.running,
+            max_items=5, reels_only=True, with_covers=True,
+            auto_process=False, delay_min_s=0, delay_max_s=0)
+        s.add(src)
+        s.commit()
+        sid = src.id
+        s.close()
+
+        from pathlib import Path
+        r = env.run(sid)
+        assert r["status"] == "completed"
+
+        from app.models import SourceItem, SourceItemStatus
+        s = maker()
+        item = s.query(SourceItem).filter_by(source_id=sid).one()
+        assert item.status == SourceItemStatus.failed
+        assert "empty download" in (item.error or "")
+        s.close()
+
+        # No orphaned cover in thumbnails/, no orphaned video in raw/
+        # (the fixture patched media_dirs to tmp_path/"raw" and /"th").
+        assert env.video_count() == 0
+        assert list((tmp_path / "th").iterdir()) == []
+        assert list((tmp_path / "raw").iterdir()) == []

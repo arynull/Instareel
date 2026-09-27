@@ -124,6 +124,13 @@ def task_age_human(started_at: str | None) -> str | None:
     return f"{secs // 3600}h ago"
 
 
+#: The watchdog task's own name — its execution must never "explain" a gap.
+#: task_prerun records the watchdog itself as the current task before its
+#: body runs; the gap is precisely the watchdog NOT having run, so seeing
+#: itself must fall through to the last-task/outage branches.
+_WATCHDOG_TASK_NAME = "tasks.health_tasks.system_watchdog"
+
+
 def busy_task_during_gap(last_run: dt.datetime) -> str | None:
     """Task name that kept the worker busy through a watchdog gap.
 
@@ -132,14 +139,24 @@ def busy_task_during_gap(last_run: dt.datetime) -> str | None:
     (reel upload, FFmpeg, analytics) — the watchdog itself queued behind it.
     Returns the task name when recorded task activity explains the gap,
     else None (genuine outage: worker or beat really was down).
+
+    Note: no alive-key check here — the caller IS the watchdog running on
+    the worker, which already proves the process is alive. (A crashed
+    worker's stale current_task can't survive anyway: task_prerun
+    overwrites the key the moment the new process runs anything.)
     """
     state = read_worker_state()
     if not state:
         return None
     cur = state.get("current_task") or {}
-    started = _parse_iso(cur.get("started_at"))
-    if started is not None and started <= last_run:
-        return cur.get("task", "")
+    task_name = cur.get("task", "")
+    if task_name and task_name != _WATCHDOG_TASK_NAME:
+        # A task is executing RIGHT NOW. Under the solo pool the watchdog
+        # itself queues behind it, so the gap is explained no matter when
+        # the task started. (The old `started <= last_run` check missed the
+        # common case — a task that began after the last watchdog run — and
+        # produced a spurious "Scheduler was down".)
+        return task_name
     last = state.get("last_task") or {}
     finished = _parse_iso(last.get("finished_at"))
     if finished is not None and finished > last_run:
