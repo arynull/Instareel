@@ -70,3 +70,12 @@ class Account(Base, TimestampMixin):
     bio_configs: Mapped[list["BioConfig"]] = relationship(
         back_populates="account", cascade="all, delete-orphan"
     )
+    # M6: deleting an account removes its schedule rules and video sources
+    # instead of orphaning them (with FK enforcement on, the DB would refuse
+    # the delete otherwise). Source items cascade via VideoSource.items.
+    schedule_rules: Mapped[list["ScheduleRule"]] = relationship(
+        back_populates="account", cascade="all, delete-orphan"
+    )
+    video_sources: Mapped[list["VideoSource"]] = relationship(
+        back_populates="account", cascade="all, delete-orphan"
+    )

@@ -627,6 +627,11 @@ async def delete_proxy(pid: int, _: str = Depends(get_current_admin), db: AsyncS
     p = await db.get(Proxy, pid)
     if not p:
         raise HTTPException(404, "Proxy not found")
+    # Detach accounts first — with FK enforcement on, deleting a referenced
+    # proxy would 500 instead (same as the purge path below).
+    from sqlalchemy import update as _update
+
+    await db.execute(_update(Account).where(Account.proxy_id == pid).values(proxy_id=None))
     await db.delete(p)
     await db.commit()
     return None

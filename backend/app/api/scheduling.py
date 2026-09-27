@@ -241,6 +241,15 @@ async def delete_caption(cid: int, _: str = Depends(get_current_admin), db: Asyn
     c = await db.get(CaptionTemplate, cid)
     if not c:
         raise HTTPException(404, "Caption not found")
+    # Detach referencing rules first — with FK enforcement on, deleting a
+    # referenced template would 500 instead of leaving NULLs.
+    from sqlalchemy import update as _update
+
+    await db.execute(
+        _update(ScheduleRule)
+        .where(ScheduleRule.caption_template_id == cid)
+        .values(caption_template_id=None)
+    )
     await db.delete(c)
     await db.commit()
     return None

@@ -56,6 +56,8 @@ class VideoSource(Base, TimestampMixin):
         back_populates="source", cascade="all, delete-orphan"
     )
 
+    account: Mapped["Account | None"] = relationship(back_populates="video_sources")
+
 
 class SourceItem(Base, TimestampMixin):
     __tablename__ = "source_items"

@@ -203,7 +203,8 @@ async def delete_video(video_id: int, _: str = Depends(get_current_admin), db: A
     if n_posts:
         raise HTTPException(409, f"Video has {n_posts} post(s) — delete them first to preserve history")
     # Retire active rules pinned to this video — a dangling pin would wait
-    # forever at fire time. Queue-mode rules are untouched.
+    # forever at fire time (and with FK enforcement on, the video delete
+    # below would 500). Queue-mode rules are untouched.
     from app.models import ScheduleRule
 
     pinned = (
@@ -215,6 +216,7 @@ async def delete_video(video_id: int, _: str = Depends(get_current_admin), db: A
     ).scalars().all()
     for r in pinned:
         r.is_active = False
+        r.pinned_video_id = None
     if pinned:
         names = ", ".join(f"'{r.name}'" for r in pinned)
         await log_event("INFO", "schedule", f"Video #{video_id} deleted — retired pinned rule(s): {names}")

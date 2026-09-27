@@ -31,6 +31,8 @@ class ScheduleRule(Base, TimestampMixin):
     # preferred_effect is ignored while pinned.
     pinned_video_id: Mapped[int | None] = mapped_column(ForeignKey("videos.id"), nullable=True)
 
+    account: Mapped["Account | None"] = relationship(back_populates="schedule_rules")
+
 
 class CaptionTemplate(Base, TimestampMixin):
     __tablename__ = "caption_templates"
