@@ -4,6 +4,7 @@ Rules fire at the admin's wall-clock, not the server's: a rule set for
 "Sat 12:00" must fire at 12:00 in SCHEDULE_TZ, whatever zone the server
 runs in.
 """
+import os
 import datetime as dt
 from zoneinfo import ZoneInfo
 
@@ -88,7 +89,7 @@ def test_timezone_endpoint_reports_configured_tz(tmp_path, monkeypatch):
     with TestClient(app) as c:
         tokens = c.post(
             "/api/v1/auth/login",
-            json={"username": "admin", "password": "changeme-please"},
+            json={"username": "admin", "password": os.environ["ADMIN_PASSWORD"]},
         ).json()
         r = c.get(
             "/api/v1/system/timezone",

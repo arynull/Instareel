@@ -84,7 +84,7 @@ def _png(path):
 class TestAuthFlow:
     def test_login_me_refresh(self, client):
         c, _, _ = client
-        r = c.post("/api/v1/auth/login", json={"username": "admin", "password": "changeme-please"})
+        r = c.post("/api/v1/auth/login", json={"username": "admin", "password": os.environ["ADMIN_PASSWORD"]})
         assert r.status_code == 200, r.text
         tokens = r.json()
         me = c.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {tokens['access_token']}"})
@@ -741,7 +741,7 @@ class TestResources:
         assert c.get("/api/v1/videos/999999/preview").status_code == 401
         assert c.get("/api/v1/videos/999999/thumbnail").status_code == 404
         tok = c.post("/api/v1/auth/login",
-                     json={"username": "admin", "password": "changeme-please"}).json()["access_token"]
+                     json={"username": "admin", "password": os.environ["ADMIN_PASSWORD"]}).json()["access_token"]
         h = {"Authorization": f"Bearer {tok}"}
         assert c.get("/api/v1/videos/999999/preview", headers=h).status_code == 404
 

@@ -46,6 +46,36 @@ class Settings(BaseSettings):
 
     ADMIN_USERNAME: str = "admin"
     ADMIN_PASSWORD: str = "changeme-please"
+
+    # Values that must never authenticate a running deployment.
+    _INSECURE_SECRET_KEYS = {"", "change-me", "change-this-to-a-long-random-string"}
+    _INSECURE_ADMIN_PASSWORDS = {"", "changeme-please"}
+
+    def validate_security(self) -> None:
+        """Fail closed when auth secrets are missing or still placeholders.
+
+        Called once at API startup (app/main.py). Tests set real values via
+        env in tests/conftest.py, so this never trips the suite.
+        """
+        problems = []
+        if self.SECRET_KEY in self._INSECURE_SECRET_KEYS:
+            problems.append(
+                "SECRET_KEY is missing or still the default — set a long random "
+                "value (anyone who knows it can forge admin JWTs)"
+            )
+        if not self.ADMIN_USERNAME:
+            problems.append("ADMIN_USERNAME is empty")
+        if self.ADMIN_PASSWORD in self._INSECURE_ADMIN_PASSWORDS:
+            problems.append(
+                "ADMIN_PASSWORD is missing or still the default placeholder — "
+                "set a real password"
+            )
+        if problems:
+            raise RuntimeError(
+                "Refusing to start with insecure auth config: "
+                + "; ".join(problems)
+                + ". Set them in the backend .env and restart."
+            )
     JWT_EXPIRE_MINUTES: int = 15
     JWT_REFRESH_DAYS: int = 7
     # Self-docs (/docs, /redoc, /openapi.json) are OFF by default — they

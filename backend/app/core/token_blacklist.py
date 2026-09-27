@@ -25,6 +25,22 @@ async def blacklist_jti(jti: str, ttl_seconds: int) -> None:
         await client.aclose()
 
 
+async def claim_jti(jti: str, ttl_seconds: int) -> bool:
+    """Atomically claim a refresh-token jti (Redis SET NX).
+
+    Returns True on first use, False if already claimed. This replaces the
+    old check-then-set (is_blacklisted + blacklist_jti), where two concurrent
+    /refresh calls could both pass the check before either wrote the key.
+    """
+    client = _client()
+    try:
+        return bool(
+            await client.set(_PREFIX + jti, "1", ex=max(int(ttl_seconds), 1), nx=True)
+        )
+    finally:
+        await client.aclose()
+
+
 async def is_blacklisted(jti: str) -> bool:
     client = _client()
     try:

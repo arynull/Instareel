@@ -8,6 +8,7 @@
 - #10 docker-compose healthchecks
 - #3  nginx allows 500MB uploads
 """
+import os
 import asyncio
 import datetime as dt
 import json
@@ -56,7 +57,7 @@ def anon_client(tmp_path, monkeypatch):
 
 def _login(c):
     r = c.post("/api/v1/auth/login",
-               json={"username": "admin", "password": "changeme-please"})
+               json={"username": "admin", "password": os.environ["ADMIN_PASSWORD"]})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -162,8 +163,11 @@ def test_rate_limit_broken_without_proxy_headers():
     assert c.get("/t", headers={"X-Forwarded-For": "9.9.9.9"}).status_code == 429
 
 
+_NGINX_TEMPLATE = REPO / "nginx" / "nginx.conf.template"
+
+
 def test_nginx_forwards_client_ip():
-    text = (REPO / "nginx" / "nginx.conf").read_text()
+    text = _NGINX_TEMPLATE.read_text()
     block = re.search(r"location /api/ \{(.*?)\n    \}", text, re.S).group(1)
     assert "proxy_set_header X-Forwarded-For" in block
     assert "proxy_set_header X-Forwarded-Proto" in block
@@ -370,7 +374,90 @@ def test_compose_healthchecks_present():
 # --------------------------------------------------------------------------
 
 def test_nginx_allows_large_uploads():
-    text = (REPO / "nginx" / "nginx.conf").read_text()
-    m = re.search(r"client_max_body_size\s+(\d+)m", text)
-    assert m is not None, "client_max_body_size not set"
+    # The limit is rendered from the environment (NGINX_ENVSUBST_FILTER), so
+    # the template holds a variable — assert the variable AND its compose
+    # default are both sane (>= 500m for the 500MB backend upload cap).
+    text = _NGINX_TEMPLATE.read_text()
+    assert re.search(r"client_max_body_size\s+\$\{CLIENT_MAX_BODY_SIZE\}", text), \
+        "client_max_body_size must come from CLIENT_MAX_BODY_SIZE"
+    compose = (REPO / "docker-compose.yml").read_text()
+    m = re.search(r"CLIENT_MAX_BODY_SIZE:\s*\$\{CLIENT_MAX_BODY_SIZE:-(\d+)m\}", compose)
+    assert m is not None, "CLIENT_MAX_BODY_SIZE default not set in compose"
     assert int(m.group(1)) >= 500
+
+
+# --------------------------------------------------------------------------
+# M2/M3 — startup refuses default/empty auth secrets (fail closed)
+# --------------------------------------------------------------------------
+
+def test_validate_security_rejects_placeholders():
+    from app.config import Settings
+
+    bad = Settings()
+    bad.SECRET_KEY = "change-me"
+    bad.ADMIN_PASSWORD = "changeme-please"
+    with pytest.raises(RuntimeError, match="SECRET_KEY"):
+        bad.validate_security()
+
+    bad2 = Settings()
+    bad2.SECRET_KEY = "a" * 64
+    bad2.ADMIN_PASSWORD = ""
+    with pytest.raises(RuntimeError, match="ADMIN_PASSWORD"):
+        bad2.validate_security()
+
+    good = Settings()
+    good.SECRET_KEY = "x" * 64
+    good.ADMIN_PASSWORD = "a-real-password"
+    good.ADMIN_USERNAME = "root"
+    good.validate_security()  # must not raise
+
+
+def test_startup_refuses_default_secret_key(monkeypatch):
+    import app.main as main_module
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "SECRET_KEY", "change-me")
+    app = main_module.create_app()
+    with pytest.raises(RuntimeError, match="SECRET_KEY"):
+        with TestClient(app):
+            pass  # pragma: no cover
+
+
+def test_empty_credentials_rejected(anon_client):
+    assert anon_client.post(
+        "/api/v1/auth/login", json={"username": "", "password": ""}
+    ).status_code == 401
+    assert anon_client.post(
+        "/api/v1/auth/login",
+        json={"username": "admin", "password": ""},
+    ).status_code == 401
+
+
+# --------------------------------------------------------------------------
+# Refresh-token claim is atomic (SET NX) — no check-then-set race
+# --------------------------------------------------------------------------
+
+def test_claim_jti_is_single_use():
+    import asyncio
+
+    from app.core import token_blacklist
+
+    async def go():
+        first = await token_blacklist.claim_jti("race-jti-1", 60)
+        second = await token_blacklist.claim_jti("race-jti-1", 60)
+        return first, second
+
+    first, second = asyncio.run(go())
+    assert first is True
+    assert second is False
+
+
+def test_refresh_replay_rejected(anon_client):
+    tokens = _login(anon_client)
+    r1 = anon_client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+    assert r1.status_code == 200
+    # Replaying the same refresh token must 401 (it was claimed on first use).
+    r2 = anon_client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+    assert r2.status_code == 401

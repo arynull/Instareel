@@ -48,11 +48,9 @@ def create_app() -> FastAPI:
 
     @application.on_event("startup")
     async def startup():
-        if settings.SECRET_KEY in ("change-me", "change-this-to-a-long-random-string", ""):
-            log.warning(
-                "SECRET_KEY is still the default — set a unique value in .env, "
-                "otherwise forged admin JWTs are trivial."
-            )
+        # Fail closed: default/empty SECRET_KEY lets anyone forge admin JWTs,
+        # and default/empty admin credentials let anyone log in.
+        settings.validate_security()
         os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
         for sub in ("raw", "processed", "thumbnails", "sessions", "audio", "profile_pics"):
             os.makedirs(os.path.join(settings.MEDIA_ROOT, sub), exist_ok=True)

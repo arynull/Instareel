@@ -13,6 +13,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("FERNET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 os.environ.setdefault("SYNC_DATABASE_URL", "sqlite://")
+# Startup refuses default/empty auth secrets (M2/M3) — the suite runs with
+# fixed test values so validate_security() never trips here.
+os.environ.setdefault("SECRET_KEY", "test-suite-only-secret-key-not-for-production")
+os.environ.setdefault("ADMIN_PASSWORD", "test-suite-only-admin-password")
 
 
 class _FakeRedis:
@@ -28,6 +32,17 @@ class _FakeRedis:
 
     async def setex(self, key: str, ttl: int, value: str) -> None:
         self._store[key] = (value, time.time() + ttl)
+
+    async def set(self, key: str, value: str, ex: int | None = None, nx: bool = False) -> bool:
+        """SET with EX/NX — mirrors redis-py for claim_jti's atomic claim."""
+        if nx:
+            item = self._store.get(key)
+            if item is not None:
+                _, exp = item
+                if exp >= time.time():
+                    return False
+        self._store[key] = (value, time.time() + (ex or 0))
+        return True
 
     async def exists(self, key: str) -> int:
         item = self._store.get(key)
