@@ -23,8 +23,28 @@ CPU = "husky"
 def session_path_for(username: str, media_root: str) -> str:
     d = os.path.join(media_root, "sessions")
     os.makedirs(d, exist_ok=True)
+    try:
+        # Session files hold auth cookies — the directory shouldn't be
+        # listable by other users even if the umask is permissive (m7).
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in username)
     return os.path.join(d, f"{safe}.json")
+
+
+def dump_session_settings(client, path: str) -> None:
+    """instagrapi dump_settings + chmod 0o600 (m7).
+
+    instagrapi writes with the process umask, which typically leaves the
+    file world-readable. Session files contain long-lived auth cookies —
+    restrict to owner-only right after every dump.
+    """
+    client.dump_settings(path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def session_owner_info(payload: object) -> "tuple[str | None, str | None]":

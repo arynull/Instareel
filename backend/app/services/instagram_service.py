@@ -85,6 +85,7 @@ class InstagramService:
                      request_timeout: float = 30):
         from instagrapi import Client
         from app.utils.instagram_helpers import device_settings_for
+        from app.utils.instagram_helpers import dump_session_settings
 
         cl = Client(request_timeout=request_timeout)
         cl.delay_range = [1, 3]
@@ -125,7 +126,7 @@ class InstagramService:
                 log.info("Stored session invalid for %s — logging in fresh", username)
             cl.login(username, password)
             if self.session_path:
-                cl.dump_settings(self.session_path)
+                dump_session_settings(cl, self.session_path)
             return True, "logged_in"
         except Exception as exc:
             kind = _classify(exc)
@@ -176,7 +177,7 @@ class InstagramService:
                 cl.login(username, password)
                 if self.session_path:
                     try:
-                        cl.dump_settings(self.session_path)
+                        dump_session_settings(cl, self.session_path)
                     except Exception:
                         pass
             # instagrapi generates the cover via MoviePy when thumbnail is
@@ -241,7 +242,7 @@ class InstagramService:
                 cl.login(username, password)
                 if self.session_path:
                     try:
-                        cl.dump_settings(self.session_path)
+                        dump_session_settings(cl, self.session_path)
                     except Exception:
                         pass
             edit: dict = {}
@@ -264,7 +265,7 @@ class InstagramService:
                     cl.account_set_public()
             if self.session_path and (edit or picture_path or make_private is not None):
                 try:
-                    cl.dump_settings(self.session_path)
+                    dump_session_settings(cl, self.session_path)
                 except Exception:
                     pass
             # Read-back: IG answers ok even when it silently drops fields.
@@ -300,7 +301,7 @@ class InstagramService:
                 cl.login(username, password)
                 if self.session_path:
                     try:
-                        cl.dump_settings(self.session_path)
+                        dump_session_settings(cl, self.session_path)
                     except Exception:
                         pass
             # POST with signed action data (same shape as set_private/_public):
@@ -313,7 +314,7 @@ class InstagramService:
                 return f"generic: unexpected response {res}"
             if self.session_path:
                 try:
-                    cl.dump_settings(self.session_path)
+                    dump_session_settings(cl, self.session_path)
                 except Exception:
                     pass
             return ""
