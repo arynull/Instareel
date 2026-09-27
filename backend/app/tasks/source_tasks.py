@@ -370,8 +370,12 @@ def ingest_source(self, source_id: int):
                 _bump(s, source, current_stage=f"anonymous pull @{source.username} (no account)")
                 run_downloaded = 0
                 consec_fail = 0
+                stopped_early = False
                 for entry in anon_items:
-                    if _stopped(s, source_id) or run_downloaded >= cap:
+                    if _stopped(s, source_id):
+                        stopped_early = True
+                        break
+                    if run_downloaded >= cap:
                         break
                     sc = entry["shortcode"]
                     exists = s.execute(
@@ -424,6 +428,13 @@ def ingest_source(self, source_id: int):
                     _publish(source_id)
                     if pacing():
                         break
+                if stopped_early:
+                    _bump(s, source, status=SourceStatus.idle, finished_at=_now(),
+                          current_stage=None)
+                    log_event_sync("INFO", "source", f"Source @{source.username} stopped",
+                                   {"source_id": source_id})
+                    _publish(source_id)
+                    return {"source_id": source_id, "status": "stopped"}
                 _finish(s, source, SourceStatus.completed)
                 mode = "anonymous (no account)"
                 log_event_sync("INFO", "source",
@@ -574,16 +585,20 @@ def ingest_source(self, source_id: int):
                         item.status = SourceItemStatus.downloading
                         s.commit()
                         _bump(s, source, current_stage=f"downloading @{source.username} #{shortcode or pk}")
-                        from pathlib import Path
-
-                        pk_int = int(pk)
-                        dl_dir = str(Path(dirs["raw"]) / f"src_{source_id}_{pk}")
-                        os.makedirs(dl_dir, exist_ok=True)
                         # Bytes go anonymous first — the session only lists.
                         got_path = None
                         cover_src = None
                         cdir = None
+                        dl_dir = None
                         try:
+                            from pathlib import Path
+
+                            try:
+                                pk_int = int(pk)
+                            except (TypeError, ValueError):
+                                raise ValueError(f"unparseable media pk {pk!r}")
+                            dl_dir = str(Path(dirs["raw"]) / f"src_{source_id}_{pk}")
+                            os.makedirs(dl_dir, exist_ok=True)
                             caption = (getattr(m, "caption_text", "") or "")[:4000] or None
                             if shortcode:
                                 res, _anon_err = anon_ingest.download_post(

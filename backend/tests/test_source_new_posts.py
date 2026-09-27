@@ -340,3 +340,51 @@ class TestMediaKnown:
         # Another source's rows don't leak across.
         assert _media_known(s, sid + 999, "1001", "sc1") is False
         s.close()
+
+
+class TestFreshBugRegressions:
+    def test_bad_pk_fails_one_item_not_the_run(self, env):
+        # m10: int(pk) used to sit outside the per-item try — one malformed
+        # pk killed the whole run. Now only that item fails.
+        sid = env.make_source(max_items=20)
+
+        class _BadPk:
+            pk = "not_a_number"
+            code = "scbad"
+            media_type = 2
+            product_type = "clips"
+            caption_text = "bad"
+
+        env.client.pages = {"": ([_BadPk(), _m(1), _m(2)], "")}
+        r = env.run(sid)
+        assert r["status"] == "completed"
+        assert r["downloaded_this_run"] == 2
+        assert env.video_count() == 2
+        s = env._maker()
+        from app.models import SourceItem, SourceItemStatus
+
+        bad = s.query(SourceItem).filter_by(source_id=sid, media_pk="not_a_number").one()
+        assert bad.status == SourceItemStatus.failed
+        assert "unparseable media pk" in (bad.error or "")
+        s.close()
+
+    def test_stop_in_anonymous_phase_reports_stopped(self, env, monkeypatch):
+        # The anonymous loop used to report "completed" on user stop.
+        import app.services.anon_ingest as anon_mod
+        from app.tasks import source_tasks
+
+        entries = [
+            {"shortcode": f"sc{i}", "is_video": True,
+             "product_type": "clips", "caption": None}
+            for i in range(1, 4)
+        ]
+        monkeypatch.setattr(anon_mod, "list_public_posts",
+                            lambda *a, **k: (entries, None))
+        monkeypatch.setattr(source_tasks, "_stopped", lambda s, sid_: True)
+        sid = env.make_source(max_items=20)
+        r = env.run(sid)
+        assert r["status"] == "stopped"
+        from app.models import SourceStatus
+
+        assert env.get_source(sid).status == SourceStatus.idle
+        assert env.video_count() == 0
