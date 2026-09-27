@@ -1,7 +1,32 @@
 import datetime as dt
 import re
+from typing import ClassVar
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class _NoNullsMixin(BaseModel):
+    """Partial-update guard: explicit JSON null for a NON-nullable column
+    would sail through validation and 500 at commit (IntegrityError).
+    Reject it here with a 422 instead.
+
+    Null stays meaningful for *nullable* columns (account_id,
+    caption_template_id, pinned_video_id, preferred_effect, category):
+    there it means "clear the field". Each Update schema declares its
+    non-nullable fields via ``_non_nullable``.
+    """
+
+    _non_nullable: ClassVar[frozenset[str]] = frozenset()
+
+    @model_validator(mode="after")
+    def _reject_null_for_non_nullable(self):
+        bad = sorted(
+            f for f in self._non_nullable
+            if f in self.model_fields_set and getattr(self, f) is None
+        )
+        if bad:
+            raise ValueError(f"null is not allowed for: {', '.join(bad)}")
+        return self
 
 
 class ScheduleRuleIn(BaseModel):
@@ -135,7 +160,10 @@ class ProxySourceOut(ProxySourceIn):
 # here is optional: a partial body touches only the keys it sends. (Using the
 # *In create schemas for PUT made partial updates impossible — required
 # fields like `name` 422'd when omitted.)
-class ScheduleRuleUpdate(BaseModel):
+class ScheduleRuleUpdate(_NoNullsMixin):
+    _non_nullable: ClassVar[frozenset[str]] = frozenset({
+        "name", "day_of_week", "hour", "minute", "is_active", "prefer_source_caption",
+    })
     name: str | None = Field(default=None, min_length=1, max_length=128)
     day_of_week: int | None = Field(default=None, ge=-1, le=6)
     hour: int | None = Field(default=None, ge=0, le=23)
@@ -148,20 +176,23 @@ class ScheduleRuleUpdate(BaseModel):
     pinned_video_id: int | None = None
 
 
-class CaptionUpdate(BaseModel):
+class CaptionUpdate(_NoNullsMixin):
+    _non_nullable: ClassVar[frozenset[str]] = frozenset({"name", "content", "is_active"})
     name: str | None = Field(default=None, min_length=1, max_length=128)
     content: str | None = Field(default=None, min_length=1)
     category: str | None = None
     is_active: bool | None = None
 
 
-class HashtagSetUpdate(BaseModel):
+class HashtagSetUpdate(_NoNullsMixin):
+    _non_nullable: ClassVar[frozenset[str]] = frozenset({"name", "tags", "is_active"})
     name: str | None = Field(default=None, min_length=1, max_length=128)
     tags: str | None = Field(default=None, min_length=1)
     is_active: bool | None = None
 
 
-class BioUpdate(BaseModel):
+class BioUpdate(_NoNullsMixin):
+    _non_nullable: ClassVar[frozenset[str]] = frozenset({"account_id", "text", "link_url", "full_name"})
     account_id: int | None = None
     text: str | None = None
     link_url: str | None = None
@@ -182,14 +213,17 @@ class BioUpdate(BaseModel):
         return s
 
 
-class EffectUpdate(BaseModel):
+class EffectUpdate(_NoNullsMixin):
+    _non_nullable: ClassVar[frozenset[str]] = frozenset({"name", "description", "ffmpeg_filter", "is_active"})
     name: str | None = Field(default=None, min_length=1, max_length=128)
     description: str | None = None
     ffmpeg_filter: str | None = None
     is_active: bool | None = None
 
 
-class AudioUpdate(BaseModel):
+class AudioUpdate(_NoNullsMixin):
+    _non_nullable: ClassVar[frozenset[str]] = frozenset(
+        {"name", "description", "music_volume", "duck_original", "is_active"})
     name: str | None = Field(default=None, min_length=1, max_length=128)
     description: str | None = None
     music_volume: float | None = Field(default=None, ge=0.0, le=2.0)
@@ -197,7 +231,9 @@ class AudioUpdate(BaseModel):
     is_active: bool | None = None
 
 
-class ProxySourceUpdate(BaseModel):
+class ProxySourceUpdate(_NoNullsMixin):
+    _non_nullable: ClassVar[frozenset[str]] = frozenset(
+        {"name", "url", "default_protocol", "default_country", "is_active"})
     name: str | None = Field(default=None, min_length=1, max_length=128)
     url: str | None = Field(default=None, min_length=8, max_length=1024)
     default_protocol: str | None = None
