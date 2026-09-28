@@ -106,6 +106,10 @@ def fetch_all_analytics():
                         p.last_analytics_check = dt.datetime.now(dt.timezone.utc)
                         s.commit()
                         updated += 1
+                        log.info(
+                            "analytics: post %s (ig %s) -> views=%s likes=%s comments=%s",
+                            pid, media_id, views, likes, comments,
+                        )
             except Exception:
                 log.exception("analytics fetch failed for post %s", pid)
         log_event_sync("INFO", "system", f"Analytics refresh: {updated} posts updated")

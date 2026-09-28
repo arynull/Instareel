@@ -358,10 +358,21 @@ class InstagramService:
         cl = self._make_client(username)
         try:
             info = cl.media_info(media_id).dict()
+            # Reels: play_count is the live metric. view_count is documented
+            # "for Video and IGTV" and can lag (or shadow) the fresh reel
+            # counter when both are present — play_count must win.
+            raw_view = info.get("view_count")
+            raw_play = info.get("play_count")
+            views = raw_play or raw_view or 0
+            if raw_view and raw_play and raw_view != raw_play:
+                log.debug(
+                    "media_info %s: view_count=%s shadowed by play_count=%s",
+                    media_id, raw_view, raw_play,
+                )
             return {
                 "like_count": info.get("like_count", 0),
                 "comment_count": info.get("comment_count", 0),
-                "view_count": info.get("view_count") or info.get("play_count") or 0,
+                "view_count": views,
             }
         except Exception as exc:
             log.warning("media_info failed for %s: %s", media_id, exc)
