@@ -264,6 +264,74 @@ def test_full_tick_posts_end_to_end(factory, tmp_path, monkeypatch):
     assert out["status"] == "posted"
 
 
+class TestReapOrphanedPosting:
+    """reap_orphaned_posting: runs once on slow-lane worker_ready; anything
+    that went to 'posting' before THIS boot is definitely wedged (a single
+    slow worker — no upload task survives a container recreation)."""
+
+    def _posting_post(self, factory, minutes_ago, md5):
+        import datetime as dt
+
+        from sqlalchemy import update
+
+        with factory() as s:
+            acc = Account(
+                username=f"orphanacc{md5}", password_enc=encrypt_secret("pw"),
+                status=AccountStatus.active)
+            s.add(acc)
+            s.flush()
+            v = Video(original_filename="o.mp4", raw_path="/tmp/o.mp4",
+                      file_size=1, md5_hash=md5)
+            s.add(v)
+            s.flush()
+            p = Post(video_id=v.id, account_id=acc.id, status=PostStatus.posting)
+            s.add(p)
+            s.flush()
+            pid = p.id
+            s.execute(
+                update(Post).where(Post.id == pid).values(
+                    updated_at=dt.datetime.now(dt.timezone.utc)
+                    - dt.timedelta(minutes=minutes_ago)))
+            s.commit()
+        return pid
+
+    def test_reaps_pre_boot_posting_row(self, factory):
+        import datetime as dt
+
+        from app.models import Notification, NotificationSeverity
+        from app.tasks.periodic_tasks import reap_orphaned_posting
+
+        pid = self._posting_post(factory, minutes_ago=60, md5="orphan1")
+        boot_cutoff = dt.datetime.now(dt.timezone.utc)
+        res = reap_orphaned_posting(boot_cutoff)
+        assert res == {"reaped": 1}
+        with factory() as s:
+            p = s.get(Post, pid)
+            assert p.status == PostStatus.failed
+            assert "restarted" in (p.fail_reason or "")
+            v = s.get(Video, p.video_id)
+            assert v.status == VideoStatus.failed
+            assert "orphan" in (v.failed_reason or "").lower()
+            # Same dedup key as the stale reaper: one notification per row.
+            n = s.query(Notification).filter_by(
+                dedup_key=f"stale-posting:{pid}").one()
+            assert n.severity == NotificationSeverity.CRITICAL
+
+    def test_ignores_post_boot_posting_row(self, factory):
+        """A post dispatched AFTER boot (updated_at >= cutoff) is untouched —
+        no race with a just-firing slot."""
+        import datetime as dt
+
+        from app.tasks.periodic_tasks import reap_orphaned_posting
+
+        pid = self._posting_post(factory, minutes_ago=1, md5="orphan2")
+        boot_cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=5)
+        res = reap_orphaned_posting(boot_cutoff)
+        assert res == {"reaped": 0}
+        with factory() as s:
+            assert s.get(Post, pid).status == PostStatus.posting
+
+
 class TestReapStalePosting:
     def _posting_post(self, factory, minutes_ago, md5):
         import datetime as dt

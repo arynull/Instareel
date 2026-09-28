@@ -364,6 +364,21 @@ def _start_alive_thread(**kwargs) -> None:
         harden_session_dir(settings.MEDIA_ROOT)
     except Exception:
         log.warning("session dir hardening failed", exc_info=True)
+    # Slow lane only: execute_post runs here, and with a single slow worker
+    # no upload task can survive a container recreation (e.g. a deploy
+    # mid-upload). Any post that went to 'posting' before THIS boot is
+    # definitely orphaned — fail it now instead of leaving it invisible
+    # until the 45-minute stale reaper fires. Posts dispatched after boot
+    # (updated_at >= booted_at) are untouched: no race with a just-firing
+    # slot. Best-effort: monitoring must never break worker startup.
+    try:
+        if _lane() in ("slow", None):
+            booted_at = _utcnow()
+            from app.tasks.periodic_tasks import reap_orphaned_posting
+
+            reap_orphaned_posting(booted_at)
+    except Exception:  # noqa: BLE001
+        log.warning("worker_signals: orphan-posting sweep failed", exc_info=True)
     threading.Thread(target=_alive_loop, name="worker-alive", daemon=True).start()
 
 

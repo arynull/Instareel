@@ -456,6 +456,85 @@ def reap_stale_posting():
     NOT auto-retry it; it only becomes postable again after the user
     verifies Instagram and reprocesses/retries manually. Never raises.
     """
+    try:
+        now = dt.datetime.now(dt.timezone.utc)
+        cutoff = now - dt.timedelta(minutes=REAP_STALE_POSTING_MINUTES)
+        reaped = _reap_posting_rows(
+            cutoff,
+            fail_reason=(
+                f"Stale 'posting' for {REAP_STALE_POSTING_MINUTES}+ min — the worker "
+                "died or lost the task mid-upload. The upload may or may not "
+                "have reached Instagram: verify there before re-posting."
+            ),
+            quarantine_reason=(
+                f"Quarantined by the stale-posting reaper: post #{{post_id}} "
+                f"sat in 'posting' for {REAP_STALE_POSTING_MINUTES}+ min and "
+                "may have been uploaded. Verify on Instagram, then "
+                "reprocess or retry manually."
+            ),
+            notify_detail=(
+                f"sat in 'posting' for over {REAP_STALE_POSTING_MINUTES} minutes — "
+                "the worker died or lost the task. It was marked failed and its video "
+                "quarantined (it will NOT be retried automatically — the upload may "
+                "already have reached Instagram). Check Instagram, then reprocess or "
+                "retry manually if the video never went up."
+            ),
+        )
+        return {"reaped": len(reaped)}
+    except Exception:  # noqa: BLE001
+        log.exception("reap_stale_posting failed")
+        return {"error": "failed"}
+
+
+def reap_orphaned_posting(boot_cutoff: dt.datetime):
+    """Fail 'posting' rows orphaned by a worker (re)start — called once from
+    worker_ready on the slow lane.
+
+    With a single slow worker, no upload task can survive a container
+    recreation (e.g. a deploy mid-upload), so any post that went to
+    'posting' BEFORE this boot (updated_at < boot_cutoff) is definitely
+    wedged — fail it now instead of leaving it invisible until the
+    45-minute stale reaper fires. A post dispatched after boot
+    (updated_at >= boot_cutoff) is untouched, so there is no race with a
+    just-firing slot. Never raises.
+    """
+    try:
+        reaped = _reap_posting_rows(
+            boot_cutoff,
+            fail_reason=(
+                "The worker restarted mid-upload (e.g. a deploy), killing the "
+                "upload task. The upload may or may not have reached "
+                "Instagram: verify there before re-posting."
+            ),
+            quarantine_reason=(
+                "Quarantined by the orphan-posting sweep: post #{post_id} was "
+                "in 'posting' when the worker restarted, so its upload task "
+                "is gone. Verify on Instagram, then reprocess or retry manually."
+            ),
+            notify_detail=(
+                "was in 'posting' when the worker restarted — its upload task "
+                "died with the old container. It was marked failed and its video "
+                "quarantined (it will NOT be retried automatically — the upload may "
+                "already have reached Instagram). Check Instagram, then reprocess or "
+                "retry manually if the video never went up."
+            ),
+        )
+        return {"reaped": len(reaped)}
+    except Exception:  # noqa: BLE001
+        log.exception("reap_orphaned_posting failed")
+
+
+def _reap_posting_rows(
+    cutoff: dt.datetime, fail_reason: str, quarantine_reason: str, notify_detail: str
+) -> list:
+    """Shared core for reap_stale_posting / reap_orphaned_posting.
+
+    Fails every 'posting' row with updated_at < cutoff, quarantines its
+    video (no auto-retry — the upload may have reached Instagram), and
+    logs + notifies per row. Returns [(post_id, username)]. The
+    stale-posting:{post_id} dedup key is shared, so a row reaped by one
+    path never notifies twice.
+    """
     from sqlalchemy import select
 
     from app.database import SyncSessionLocal
@@ -467,65 +546,46 @@ def reap_stale_posting():
         publish_sync,
     )
 
-    try:
-        now = dt.datetime.now(dt.timezone.utc)
-        cutoff = now - dt.timedelta(minutes=REAP_STALE_POSTING_MINUTES)
+    reaped = []
+    with SyncSessionLocal() as s:
+        rows = (
+            s.execute(
+                select(Post, Account.username)
+                .join(Account, Post.account_id == Account.id, isouter=True)
+                .where(Post.status == PostStatus.posting)
+            )
+        ).all()
         # Filter in Python: updated_at comes back naive from SQLite and
         # string-comparing it against an aware cutoff in SQL is fragile.
         # 'posting' rows are bounded by worker concurrency (a handful).
-        reaped = []
-        with SyncSessionLocal() as s:
-            rows = (
-                s.execute(
-                    select(Post, Account.username)
-                    .join(Account, Post.account_id == Account.id, isouter=True)
-                    .where(Post.status == PostStatus.posting)
-                )
-            ).all()
-            for post, username in rows:
-                ts = as_aware_utc(post.updated_at)
-                if ts is None or ts >= cutoff:
-                    continue
-                post.status = PostStatus.failed
-                post.fail_reason = (
-                    f"Stale 'posting' for {REAP_STALE_POSTING_MINUTES}+ min — the worker "
-                    "died or lost the task mid-upload. The upload may or may not "
-                    "have reached Instagram: verify there before re-posting."
-                )
-                # Quarantine the video in the same transaction: with only the
-                # post failed, the scheduler would auto-pick this processed
-                # video at the next slot and risk a double upload.
-                video = s.get(Video, post.video_id)
-                if video is not None and video.status != VideoStatus.posted:
-                    video.status = VideoStatus.failed
-                    video.failed_reason = (
-                        f"Quarantined by the stale-posting reaper: post #{post.id} "
-                        f"sat in 'posting' for {REAP_STALE_POSTING_MINUTES}+ min and "
-                        "may have been uploaded. Verify on Instagram, then "
-                        "reprocess or retry manually."
-                    )
-                reaped.append((post.id, username or "?"))
-            s.commit()
-        for post_id, username in reaped:
-            log_event_sync(
-                "WARNING", "post",
-                f"Post {post_id} to @{username} reaped from stale 'posting'",
-                {"post_id": post_id},
-            )
-            notify_sync(
-                "post_failed",
-                "critical",
-                f"Post to @{username} stalled mid-upload",
-                f"Post #{post_id} sat in 'posting' for over {REAP_STALE_POSTING_MINUTES} minutes — "
-                "the worker died or lost the task. It was marked failed and its video "
-                "quarantined (it will NOT be retried automatically — the upload may "
-                "already have reached Instagram). Check Instagram, then reprocess or "
-                "retry manually if the video never went up.",
-                link="/dashboard/posts",
-                dedup_key=f"stale-posting:{post_id}",
-            )
-            publish_sync("post_status_update", {"post_id": post_id, "status": "failed"})
-        return {"reaped": len(reaped)}
-    except Exception:  # noqa: BLE001
-        log.exception("reap_stale_posting failed")
-        return {"error": "failed"}
+        for post, username in rows:
+            ts = as_aware_utc(post.updated_at)
+            if ts is None or ts >= cutoff:
+                continue
+            post.status = PostStatus.failed
+            post.fail_reason = fail_reason
+            # Quarantine the video in the same transaction: with only the
+            # post failed, the scheduler would auto-pick this processed
+            # video at the next slot and risk a double upload.
+            video = s.get(Video, post.video_id)
+            if video is not None and video.status != VideoStatus.posted:
+                video.status = VideoStatus.failed
+                video.failed_reason = quarantine_reason.format(post_id=post.id)
+            reaped.append((post.id, username or "?"))
+        s.commit()
+    for post_id, username in reaped:
+        log_event_sync(
+            "WARNING", "post",
+            f"Post {post_id} to @{username} reaped from stale 'posting'",
+            {"post_id": post_id},
+        )
+        notify_sync(
+            "post_failed",
+            "critical",
+            f"Post to @{username} stalled mid-upload",
+            f"Post #{post_id} {notify_detail}",
+            link="/dashboard/posts",
+            dedup_key=f"stale-posting:{post_id}",
+        )
+        publish_sync("post_status_update", {"post_id": post_id, "status": "failed"})
+    return reaped
