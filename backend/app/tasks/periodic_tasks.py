@@ -41,7 +41,7 @@ def fetch_all_analytics():
     from app.models import Account, Post, PostStatus
     from app.services.instagram_service import InstagramService
     from app.tasks import sync_helpers as sched
-    from app.tasks.sync_helpers import log_event_sync
+    from app.tasks.sync_helpers import log_event_sync, notify_sync
     from app.utils.instagram_helpers import session_path_for
 
     try:
@@ -110,8 +110,24 @@ def fetch_all_analytics():
                 log.exception("analytics fetch failed for post %s", pid)
         log_event_sync("INFO", "system", f"Analytics refresh: {updated} posts updated")
         return {"updated": updated}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # Same silent-death class check_and_post had: a crashing analytics
+        # sweep froze every view count with zero user-visible signal (the
+        # skipped-0018-migration incident did exactly this — select(Post)
+        # raised on every run). Notify once per error class, deduped while
+        # unread; warning, not critical — posting itself is unaffected.
         log.exception("fetch_all_analytics failed")
+        err = f"{type(exc).__name__}: {exc}".strip().rstrip(":")[:500]
+        log_event_sync("ERROR", "system", f"Analytics refresh failed: {err}")
+        notify_sync(
+            "analytics_error",
+            "warning",
+            "Analytics refresh failed",
+            f"The periodic view/like refresh hit an error and view counts "
+            f"are stale: {err}.",
+            link="/dashboard/logs",
+            dedup_key=f"analytics_error:{type(exc).__name__}",
+        )
         return {"error": "failed"}
 
 
