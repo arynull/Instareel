@@ -112,7 +112,11 @@ export function NotificationBell() {
       {open && (
         <>
           <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full z-40 mt-2 flex max-h-[80vh] w-[min(24rem,90vw)] flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-950">
+          {/* Mobile: full-width sheet under the header (fixed to the viewport).
+              The bell is NOT the rightmost header item on mobile (theme/logout/
+              username sit to its right), so an `absolute right-0` dropdown
+              anchored to the button would hang half off the left edge. */}
+          <div className="fixed inset-x-3 top-[4.5rem] z-40 flex max-h-[calc(100dvh-5.5rem)] flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-950 md:absolute md:inset-x-auto md:left-auto md:right-0 md:top-full md:mt-2 md:max-h-[80vh] md:w-[24rem]">
             <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
               <span className="text-sm font-bold">Notifications</span>
               {unreadCount > 0 && (
