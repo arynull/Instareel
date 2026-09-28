@@ -1099,4 +1099,4 @@ class TestGuardianEndpoints:
         body = c.get(f"/api/v1/videos/{vid_id}/score").json()
         cap = next(b for b in body["breakdown"] if b["key"] == "caption")
         assert cap["points"] == 20, body
-        assert not any("هشتگ ندارد" in s for s in body["suggestions"])
+        assert not any("No hashtags" in s for s in body["suggestions"])
