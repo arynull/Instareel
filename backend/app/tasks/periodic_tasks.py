@@ -29,7 +29,13 @@ def _post_age_hours(posted_at: "dt.datetime | None", now: "dt.datetime") -> floa
 
 
 @celery.task(name="tasks.analytics_tasks.fetch_all_analytics")
-def fetch_all_analytics():
+def fetch_all_analytics(force_refresh: bool = False):
+    """Sweep posted reels and refresh their IG stats.
+
+    force_refresh (manual trigger only): re-check the stalest posts even if
+    they were checked within ANALYTICS_MIN_INTERVAL_HOURS — otherwise a manual
+    refresh right after a scheduled sweep would no-op and feel broken.
+    """
     import random
     import time
 
@@ -64,7 +70,9 @@ def fetch_all_analytics():
             items = [
                 (p.id, p.account_id, p.ig_media_id, p.posted_at)
                 for p in posts
-                if (last := sched.as_aware_utc(p.last_analytics_check)) is None or last <= recent
+                if force_refresh
+                or (last := sched.as_aware_utc(p.last_analytics_check)) is None
+                or last <= recent
             ][:MAX_ANALYTICS_PER_RUN]
         updated = 0
         for pid, acc_id, media_id, posted_at in items:

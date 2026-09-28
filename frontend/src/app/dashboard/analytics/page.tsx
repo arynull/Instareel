@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Card, CardTitle, QueryFailed, Spinner } from "@/components/ui";
 import { toast } from "@/components/toast";
-import { useAccounts, useBestSlots, useOverview } from "@/hooks/use-api";
+import { useAccounts, useBestSlots, useOverview, useApiMutation } from "@/hooks/use-api";
 import { api } from "@/lib/api";
 import { fmt, parseApiDate, timeAgo } from "@/lib/utils";
 
@@ -14,6 +14,7 @@ export default function AnalyticsPage() {
   const { data: accounts } = useAccounts();
   const [slotAccount, setSlotAccount] = useState("");
   const { data: slots, isLoading: slotsLoading } = useBestSlots(slotAccount);
+  const refresh = useApiMutation("post", [["overview"]], "Refresh queued — fresh numbers land in a few minutes");
 
   async function exportCsv() {
     if (exporting) return;
@@ -47,6 +48,11 @@ export default function AnalyticsPage() {
           {[7, 14, 30, 90].map((d) => <option key={d} value={d}>Last {d} days</option>)}
         </select>
         <button className="btn-ghost !py-2 text-xs sm:text-sm" disabled={exporting} onClick={exportCsv}>{exporting ? "Exporting…" : "Export CSV"}</button>
+        <button
+          className="btn-ghost !py-2 text-xs sm:text-sm"
+          disabled={refresh.isPending}
+          onClick={() => refresh.mutate({ url: "/analytics/refresh" })}
+        >{refresh.isPending ? "Queuing…" : "Refresh now"}</button>
       </div>
       <div className="grid gap-4 sm:grid-cols-3">
         <Card><p className="text-2xl font-extrabold">{fmt(data.total_posts)}</p><p className="text-xs text-zinc-500">Posts</p></Card>

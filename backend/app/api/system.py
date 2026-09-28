@@ -192,6 +192,41 @@ async def overview(days: int = Query(default=30, ge=1, le=365), _: str = Depends
     return data
 
 
+#: Manual analytics refresh: one sweep queued/running at a time. The TTL
+#: outlives the slowest sweep (20 posts x sleeps + IG fetches) so a second
+#: tap while one is in flight gets a 429 instead of hammering Instagram.
+ANALYTICS_REFRESH_LOCK = "analytics:manual_refresh_lock"
+ANALYTICS_REFRESH_LOCK_TTL_S = 30 * 60
+
+
+@analytics_router.post("/refresh")
+async def refresh_analytics(_: str = Depends(get_current_admin)):
+    """Queue an immediate analytics sweep (slow lane), bypassing the 3h
+    per-post minimum interval — the scheduled sweep would otherwise no-op
+    on recently checked posts and the button would feel broken."""
+    client = None
+    try:
+        client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        if not await client.set(ANALYTICS_REFRESH_LOCK, "1", nx=True, ex=ANALYTICS_REFRESH_LOCK_TTL_S):
+            raise HTTPException(
+                status_code=429,
+                detail="A refresh is already queued or running — fresh numbers land within a few minutes.",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        # Redis down: still allow the trigger; the sweep itself is idempotent
+        # and the 3h interval filter on the scheduled path limits overlap.
+        pass
+    finally:
+        if client is not None:
+            await client.aclose()
+    from app.tasks.celery_app import celery
+
+    celery.send_task("tasks.analytics_tasks.fetch_all_analytics", kwargs={"force_refresh": True})
+    return {"status": "queued"}
+
+
 @analytics_router.get("/posts")
 async def posts_breakdown(limit: int = Query(default=100, ge=1, le=2000), _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(Post).where(Post.status == PostStatus.posted).order_by(desc(Post.posted_at)).limit(limit))).scalars().all()
