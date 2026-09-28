@@ -71,6 +71,7 @@ def _post_out(p: Post, audio_track: str | None = None) -> PostOut:
         audio_track=audio_track, is_trial=p.is_trial,
         scheduled_for=p.scheduled_for, posted_at=p.posted_at, views_24h=p.views_24h,
         views_7d=p.views_7d, likes_24h=p.likes_24h, engagement_rate=p.engagement_rate,
+        last_analytics_check=p.last_analytics_check,
         fail_reason=p.fail_reason, retry_count=p.retry_count, created_at=p.created_at,
     )
 

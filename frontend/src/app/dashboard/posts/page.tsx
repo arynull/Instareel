@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { Card, EmptyState, QueryFailed, Spinner, StatusBadge } from "@/components/ui";
 import { useApiMutation, usePosts, useQueue } from "@/hooks/use-api";
-import { fmt, timeAgo } from "@/lib/utils";
+import { fmt, parseApiDate, timeAgo } from "@/lib/utils";
 import type { Post } from "@/types/models";
 
 export default function PostsPage() {
@@ -47,6 +47,7 @@ export default function PostsPage() {
                     <th className="py-2 pr-4">Post</th><th className="py-2 pr-4">Status</th>
                     <th className="py-2 pr-4">Audio</th>
                     <th className="py-2 pr-4 text-right">Views</th><th className="py-2 pr-4 text-right">Eng.</th>
+                    <th className="py-2 pr-4 text-right">Checked</th>
                     <th className="py-2 pr-4">Link</th><th className="py-2 text-right">Actions</th>
                   </tr>
               </thead>
@@ -58,6 +59,12 @@ export default function PostsPage() {
                     <td className="max-w-[160px] truncate py-2 pr-4 text-zinc-500" title={p.audio_track ?? ""}>{p.audio_track ?? "—"}{p.is_trial ? " · trial" : ""}</td>
                     <td className="py-2 pr-4 text-right">{fmt(p.views_7d ?? p.views_24h)}</td>
                     <td className="py-2 pr-4 text-right">{p.engagement_rate != null ? `${p.engagement_rate}%` : "—"}</td>
+                    <td
+                      className="whitespace-nowrap py-2 pr-4 text-right text-xs text-zinc-500"
+                      title={p.last_analytics_check ? parseApiDate(p.last_analytics_check).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : undefined}
+                    >
+                      {p.last_analytics_check ? timeAgo(p.last_analytics_check) : "—"}
+                    </td>
                     <td className="py-2 pr-4">{p.ig_permalink ? <a className="text-emerald-500 hover:underline" href={p.ig_permalink} target="_blank">Reel ↗</a> : "—"}</td>
                     <td className="whitespace-nowrap py-2 text-right">
                       {p.status === "failed" && <button className="btn-ghost mr-2 !px-3 !py-1 text-xs" disabled={busyId === p.id} onClick={async () => { setBusyId(p.id); try { await retry.mutateAsync({ url: `/posts/${p.id}/retry` }); } finally { setBusyId(null); } }}>{busyId === p.id ? "Retrying…" : "Retry"}</button>}

@@ -5,7 +5,7 @@ import { Card, CardTitle, QueryFailed, Spinner } from "@/components/ui";
 import { toast } from "@/components/toast";
 import { useAccounts, useBestSlots, useOverview } from "@/hooks/use-api";
 import { api } from "@/lib/api";
-import { fmt } from "@/lib/utils";
+import { fmt, parseApiDate, timeAgo } from "@/lib/utils";
 
 export default function AnalyticsPage() {
   const [days, setDays] = useState(30);
@@ -50,7 +50,13 @@ export default function AnalyticsPage() {
       </div>
       <div className="grid gap-4 sm:grid-cols-3">
         <Card><p className="text-2xl font-extrabold">{fmt(data.total_posts)}</p><p className="text-xs text-zinc-500">Posts</p></Card>
-        <Card><p className="text-2xl font-extrabold">{fmt(data.total_views)}</p><p className="text-xs text-zinc-500">Views</p></Card>
+        <Card><p className="text-2xl font-extrabold">{fmt(data.total_views)}</p><p className="text-xs text-zinc-500">Views</p>
+          <p
+            className="mt-1 text-xs text-zinc-400"
+            title={data.last_analytics_refresh ? parseApiDate(data.last_analytics_refresh).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : undefined}
+          >
+            Last refresh: {data.last_analytics_refresh ? timeAgo(data.last_analytics_refresh) : "never"}
+          </p></Card>
         <Card><p className="text-2xl font-extrabold">{data.avg_engagement_rate}%</p><p className="text-xs text-zinc-500">Avg engagement</p></Card>
       </div>
       <Card>

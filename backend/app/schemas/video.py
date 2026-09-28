@@ -51,6 +51,7 @@ class PostOut(BaseModel):
     views_7d: int | None
     likes_24h: int | None
     engagement_rate: float | None
+    last_analytics_check: dt.datetime | None = None
     fail_reason: str | None
     retry_count: int
     created_at: dt.datetime

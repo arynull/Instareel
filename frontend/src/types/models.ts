@@ -20,6 +20,7 @@ export interface Post {
   ig_permalink: string | null; caption: string; hashtags: string; status: string;
   scheduled_for: string | null; posted_at: string | null; audio_track: string | null; is_trial: boolean; views_24h: number | null;
   views_7d: number | null; likes_24h: number | null; engagement_rate: number | null;
+  last_analytics_check: string | null;
   fail_reason: string | null; retry_count: number; created_at: string;
 }
 

@@ -714,7 +714,8 @@ class TestResources:
 
                 s.add(Post(video_id=vid.id, account_id=acc.id, status=PostStatus.posted,
                            posted_at=dt.datetime.now(dt.timezone.utc),
-                           views_7d=100, likes_7d=10, comments_7d=2, engagement_rate=12.0))
+                           views_7d=100, likes_7d=10, comments_7d=2, engagement_rate=12.0,
+                           last_analytics_check=dt.datetime.now(dt.timezone.utc)))
                 await s.commit()
 
         import asyncio
@@ -722,6 +723,7 @@ class TestResources:
         _run(seed())
         ov = c.get("/api/v1/analytics/overview?days=30").json()
         assert ov["total_posts"] == 1 and ov["total_views"] == 100
+        assert ov["last_analytics_refresh"] is not None
         assert c.get("/api/v1/analytics/overview?days=-5").status_code == 422
         assert len(c.get("/api/v1/analytics/accounts").json()) == 1
         eff = c.get("/api/v1/analytics/effects").json()

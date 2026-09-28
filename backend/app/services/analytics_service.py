@@ -14,6 +14,16 @@ async def overview(session, since: dt.datetime | None = None) -> dict:
         post_q = post_q.where(Post.posted_at >= since)
     total_posts, total_views = (await session.execute(post_q)).one()
 
+    # Freshness of the numbers above: when the analytics sweep last
+    # refreshed any posted post (null when nothing was ever checked).
+    last_refresh = (
+        await session.execute(
+            select(func.max(Post.last_analytics_check)).where(
+                Post.status == PostStatus.posted
+            )
+        )
+    ).scalar()
+
     eng_q = select(func.avg(Post.engagement_rate)).where(
         Post.status == PostStatus.posted, Post.engagement_rate.is_not(None)
     )
@@ -39,6 +49,7 @@ async def overview(session, since: dt.datetime | None = None) -> dict:
     return {
         "total_posts": total_posts,
         "total_views": int(total_views or 0),
+        "last_analytics_refresh": last_refresh.isoformat() if last_refresh else None,
         "avg_engagement_rate": round(float(avg_eng), 2),
         "active_accounts": active_accounts,
         "queue_size": queue,
