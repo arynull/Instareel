@@ -21,6 +21,7 @@ export default function AccountsPage() {
   const [uploadingId, setUploadingId] = useState<number | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [uploadTarget, setUploadTarget] = useState<number | null>(null);
+  const [loggingInId, setLoggingInId] = useState<number | null>(null);
   const accounts = (data ?? []) as Account[];
   const proxyList = (proxies ?? []) as Proxy[];
 
@@ -31,8 +32,52 @@ export default function AccountsPage() {
     return `${p.protocol}://${host}${p.country ? ` (${p.country})` : ""}${p.is_healthy ? "" : " [down]"}`;
   }
 
-  async function uploadSession(accountId: number, file: File) {
-    setUploadingId(accountId);
+  /** Login runs in the background server-side (202); poll login-status
+   *  until it finishes instead of holding one long request. */
+  async function loginWithPoll(accountId: number) {
+    if (loggingInId != null) return;
+    setLoggingInId(accountId);
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    try {
+      try {
+        await api.post(`/accounts/${accountId}/login`);
+      } catch (e: unknown) {
+        // 409 = a login is already running for this account: just poll it.
+        const status = (e as { response?: { status?: number } })?.response?.status;
+        if (status !== 409) throw e;
+      }
+      const deadline = Date.now() + 4.5 * 60 * 1000;
+      for (;;) {
+        await sleep(3000);
+        let st: { status?: string; detail?: string };
+        try {
+          ({ data: st } = await api.get(`/accounts/${accountId}/login-status`));
+        } catch {
+          break; // status endpoint gone — the accounts refetch below shows reality
+        }
+        if (st.status === "ok") {
+          toast("success", "Login successful — session refreshed");
+          break;
+        }
+        if (st.status === "failed") {
+          toast("error", `Login failed: ${st.detail ?? "unknown error"}`);
+          break;
+        }
+        if (st.status !== "running" || Date.now() > deadline) {
+          toast("error", "Login is taking too long — check System Log, then retry");
+          break;
+        }
+      }
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast("error", msg ? String(msg) : "Login request failed");
+    } finally {
+      setLoggingInId(null);
+      qc.invalidateQueries({ queryKey: ["accounts"] });
+    }
+  }
+
+  async function uploadSession(accountId: number, file: File) {    setUploadingId(accountId);
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -131,7 +176,13 @@ export default function AccountsPage() {
                 </Field>
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
-                {actBtn(`/accounts/${a.id}/login`, "Login")}
+                <button
+                  className="btn-ghost !px-3 !py-1.5 text-xs"
+                  disabled={action.isPending || loggingInId != null}
+                  onClick={() => loginWithPoll(a.id)}
+                >
+                  {loggingInId === a.id ? "Logging in…" : "Login"}
+                </button>
                 {actBtn(`/accounts/${a.id}/test-session`, "Test session")}
                 <button
                   className="btn-ghost !px-3 !py-1.5 text-xs"

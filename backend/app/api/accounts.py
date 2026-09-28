@@ -1,7 +1,10 @@
 """IG accounts CRUD + session management."""
+import asyncio
 import datetime as dt
 import json
 import os
+import threading
+import time
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from sqlalchemy import func, select
@@ -191,14 +194,140 @@ def _blocking_login(username: str, password: str, proxy_url: str | None, session
     return InstagramService(proxy_url=proxy_url, session_path=session_path).login(username, password)
 
 
-@router.post("/{account_id}/login")
+#: Background Instagram login tasks, keyed by account id. A login through a
+#: slow proxy can take minutes; it must never block the event loop (a single
+#: uvicorn worker serves the whole dashboard — one blocking .result() froze
+#: every concurrent request and the UI showed "Load failed" on unrelated
+#: pages). The dashboard polls login-status for progress instead.
+_login_tasks: dict[int, dict] = {}
+_login_tasks_lock = threading.Lock()
+#: A "running" entry older than this is treated as dead (e.g. the server was
+#: restarted mid-login): the status endpoint heals it instead of wedging the
+#: account behind a permanent 409.
+LOGIN_TASK_STALE_S = 600
+#: Hard cap for one login attempt (mirrors the old synchronous endpoint).
+LOGIN_TASK_TIMEOUT_S = 180
+
+
+def _login_task_get(account_id: int) -> dict | None:
+    with _login_tasks_lock:
+        task = _login_tasks.get(account_id)
+        if (
+            task
+            and task["status"] == "running"
+            and time.monotonic() - task["started_at"] > LOGIN_TASK_STALE_S
+        ):
+            task = {
+                **task,
+                "status": "failed",
+                "detail": "Login interrupted (server restarted?) — try again.",
+                "finished_at": time.time(),
+            }
+            _login_tasks[account_id] = task
+        return dict(task) if task else None
+
+
+def _login_task_claim(account_id: int) -> bool:
+    """Reserve the login slot; False when a live login is already running."""
+    with _login_tasks_lock:
+        task = _login_tasks.get(account_id)
+        if (
+            task
+            and task["status"] == "running"
+            and time.monotonic() - task["started_at"] <= LOGIN_TASK_STALE_S
+        ):
+            return False
+        _login_tasks[account_id] = {
+            "status": "running",
+            "detail": "Login in progress…",
+            "started_at": time.monotonic(),
+            "finished_at": None,
+        }
+        return True
+
+
+def _login_task_finish(account_id: int, ok: bool, detail: str) -> None:
+    with _login_tasks_lock:
+        prev = _login_tasks.get(account_id) or {}
+        _login_tasks[account_id] = {
+            "status": "ok" if ok else "failed",
+            "detail": detail,
+            "started_at": prev.get("started_at", time.monotonic()),
+            "finished_at": time.time(),
+        }
+
+
+def _apply_login_result(account_id: int, username: str, session_path: str, ok: bool, detail: str) -> None:
+    """Persist the login outcome (runs in the worker thread — sync DB only)."""
+    from app.database import SyncSessionLocal
+    from app.models import Account, AccountStatus
+    from app.tasks.sync_helpers import log_event_sync, publish_sync
+
+    new_status: str | None = None
+    try:
+        with SyncSessionLocal() as s:
+            acc = s.get(Account, account_id)
+            if acc is not None:
+                if ok:
+                    acc.status = AccountStatus.active
+                    acc.last_login = dt.datetime.now(dt.timezone.utc)
+                    acc.session_file_path = session_path
+                elif str(detail).startswith("challenge"):
+                    acc.status = AccountStatus.challenge_required
+                s.commit()
+                new_status = acc.status.value
+    except Exception as exc:
+        # Bookkeeping must never mask the login outcome itself.
+        log_event_sync("ERROR", "account", f"Login bookkeeping failed for @{username}: {exc}")
+    try:
+        log_event_sync("INFO" if ok else "WARNING", "account", f"Manual login @{username}: {detail}")
+        if new_status is not None:
+            publish_sync("account_status_change", {"account_id": account_id, "status": new_status})
+    except Exception:
+        pass
+
+
+def _run_login_task(
+    account_id: int, username: str, password: str, proxy_url: str | None, session_path: str
+) -> None:
+    """Blocking Instagram login in a daemon thread; never touches the event loop."""
+    import concurrent.futures
+    import logging
+
+    log = logging.getLogger("igfunnel.accounts")
+    ok, detail = False, "login crashed before starting"
+    try:
+        # Nested executor keeps the 180s backstop without blocking the loop:
+        # on timeout the attempt is marked failed instead of hanging forever.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            try:
+                ok, detail = pool.submit(
+                    _blocking_login, username, password, proxy_url, session_path
+                ).result(timeout=LOGIN_TASK_TIMEOUT_S)
+            except concurrent.futures.TimeoutError:
+                ok, detail = False, (
+                    f"Login timed out after {LOGIN_TASK_TIMEOUT_S}s — the route to Instagram stalled"
+                )
+        _apply_login_result(account_id, username, session_path, ok, detail)
+    except Exception as exc:  # never leave the task wedged on "running"
+        log.exception("Login worker crashed for account %s", account_id)
+        ok, detail = False, f"login crashed: {exc}"
+    finally:
+        _login_task_finish(account_id, ok, detail)
+
+
+@router.post("/{account_id}/login", status_code=202)
 @limiter.limit("5/minute")
 async def force_login(
     request: Request, account_id: int, _: str = Depends(get_current_admin),
     db: AsyncSession = Depends(__import__("app.api.deps", fromlist=["get_db"]).get_db),
 ):
-    import concurrent.futures
+    """Start a background Instagram login; poll login-status for the outcome.
 
+    Returns 202 immediately — the old version blocked the event loop for up
+    to 180s, freezing the whole backend (single uvicorn worker) so every
+    concurrent dashboard request failed.
+    """
     from app.config import settings
     from app.services.proxy_service import proxy_url_for
     from app.utils.instagram_helpers import session_path_for
@@ -206,35 +335,33 @@ async def force_login(
     acc = await db.get(Account, account_id)
     if not acc:
         raise HTTPException(404, "Account not found")
+    if not _login_task_claim(account_id):
+        raise HTTPException(
+            409, "A login is already in progress for this account — poll login-status."
+        )
     proxy = await db.get(Proxy, acc.proxy_id) if acc.proxy_id else None
     username, password = acc.username, decrypt_secret(acc.password_enc)
     purl = proxy_url_for(proxy) if proxy else None
     spath = session_path_for(username, settings.MEDIA_ROOT)
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            ok, detail = pool.submit(_blocking_login, username, password, purl, spath).result(timeout=180)
-    except concurrent.futures.TimeoutError:
-        await log_event("ERROR", "account", f"Manual login timed out for @{username}")
-        raise HTTPException(504, "Login timed out after 180s — the route to Instagram stalled")
-    acc = await db.get(Account, account_id)
-    if acc:
-        if ok:
-            acc.status = AccountStatus.active
-            acc.last_login = dt.datetime.now(dt.timezone.utc)
-            acc.session_file_path = spath
-        elif detail.startswith("challenge"):
-            acc.status = AccountStatus.challenge_required
-        await db.commit()
-        import asyncio
+    thread = threading.Thread(
+        target=_run_login_task,
+        args=(account_id, username, password, purl, spath),
+        name=f"ig-login-{account_id}",
+        daemon=True,
+    )
+    thread.start()
+    return {"ok": True, "status": "running", "detail": "Login started in the background."}
 
-        from app.tasks.sync_helpers import publish_sync
 
-        await asyncio.to_thread(
-            publish_sync, "account_status_change",
-            {"account_id": acc.id, "status": acc.status.value},
-        )
-    await log_event("INFO" if ok else "WARNING", "account", f"Manual login @{username}: {detail}")
-    return {"ok": ok, "detail": detail}
+@router.get("/{account_id}/login-status")
+async def login_status(
+    account_id: int, _: str = Depends(get_current_admin),
+):
+    """Poll the background login task: running | ok | failed (+ detail)."""
+    task = _login_task_get(account_id)
+    if task is None:
+        raise HTTPException(404, "No login task for this account")
+    return {"account_id": account_id, **task}
 
 
 @router.post("/{account_id}/test-session")
@@ -257,14 +384,23 @@ async def test_session(
     username = acc.username
     purl = proxy_url_for(proxy) if proxy else None
     spath = acc.session_file_path or session_path_for(username, settings.MEDIA_ROOT)
+    # Await the check instead of a blocking .result(): with a single uvicorn
+    # worker a blocking wait froze the whole backend for every concurrent
+    # request (same bug as the old /login endpoint). The pool is shut down
+    # without waiting so a timed-out check never stalls the loop — its
+    # thread simply finishes whenever the network call returns.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            valid, reason = pool.submit(
-                InstagramService(proxy_url=purl, session_path=spath).check_session, username
-            ).result(timeout=120)
-    except concurrent.futures.TimeoutError:
-        return {"valid": False, "detail": "Session check timed out after 120s — the route to Instagram stalled"}
-    return {"valid": valid, "detail": "Session is valid" if valid else f"Session invalid — {reason}"}
+        fut = pool.submit(
+            InstagramService(proxy_url=purl, session_path=spath).check_session, username
+        )
+        try:
+            valid, reason = await asyncio.wait_for(asyncio.wrap_future(fut), timeout=120)
+        except (asyncio.TimeoutError, concurrent.futures.TimeoutError):
+            return {"valid": False, "detail": "Session check timed out after 120s — the route to Instagram stalled"}
+        return {"valid": valid, "detail": "Session is valid" if valid else f"Session invalid — {reason}"}
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 @router.post("/{account_id}/session")
