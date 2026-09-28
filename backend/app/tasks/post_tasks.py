@@ -281,8 +281,24 @@ def check_and_post(self):
         for pid in due_ids:
             execute_post.delay(pid)
         return {"slots_matched": slots_matched, "created": created, "fired": len(due_ids)}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # A failed tick used to die silently: beat kept firing, the
+        # watchdog only watches gaps between runs, and nothing told the
+        # admin that no post will fire until this is fixed (e.g. a missing
+        # DB column after a skipped migration). Notify once per error class
+        # — deduped while unread — so a persistent failure doesn't spam.
         log.exception("check_and_post failed")
+        err = f"{type(exc).__name__}: {exc}".strip().rstrip(":")[:500]
+        log_event_sync("ERROR", "schedule", f"Scheduler tick failed: {err}")
+        notify_sync(
+            "tick_error",
+            "critical",
+            "Scheduler tick failed",
+            f"The posting scheduler hit an error and this tick did nothing: "
+            f"{err}. No posts will fire until this is fixed.",
+            link="/dashboard/logs",
+            dedup_key=f"tick_error:{type(exc).__name__}",
+        )
         return {"error": "tick failed"}
 
 
