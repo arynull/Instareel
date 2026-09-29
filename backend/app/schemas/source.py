@@ -9,7 +9,6 @@ _USERNAME_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
 
 class SourceIn(BaseModel):
     username: str = Field(min_length=1, max_length=32)
-    account_id: int | None = None
     max_items: int = Field(default=20, ge=1, le=200)
     reels_only: bool = True
     with_covers: bool = True
@@ -34,7 +33,6 @@ class SourceIn(BaseModel):
 
 
 class SourceUpdate(BaseModel):
-    account_id: int | None = None
     max_items: int = Field(default=20, ge=1, le=200)
     reels_only: bool = True
     with_covers: bool = True

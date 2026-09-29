@@ -1,19 +1,21 @@
 """Video source ingestion: pull reels from an IG page into the videos pipeline.
 
-Two modes, chosen per run — anonymous FIRST, authenticated as fallback:
+Strictly ANONYMOUS — no IG account or session file is ever touched:
 
-- ANONYMOUS (no account needed): newest posts are listed via the public
-  web_profile_info endpoint and each reel is pulled with yt-dlp
-  (video + cover + caption, no session). Works for public pages as long
-  as IG serves the listing endpoint to our IP (datacenter ranges are
-  often 429'd — then we fall through to authed mode).
-- AUTHED: listing via a download account's session (cheap read-only
-  calls), but every item's BYTES still go through yt-dlp anonymously
-  first — the session is only spent when anonymous fetch fails.
+- Listing via the public web_profile_info endpoint and each reel pulled
+  with yt-dlp (video + cover + caption, no session). Works for public
+  pages as long as IG serves the listing endpoint to our route: direct
+  server IP first, otherwise the healthiest spare proxy from the pool
+  (datacenter ranges are often 429'd).
+- There is deliberately NO authenticated fallback. Bulk listing and
+  media downloads through an account session is exactly the pattern
+  Instagram flags as scraping — it cost us killed sessions — while the
+  user only ever sources public pages, so a session buys nothing.
 
-Either way, per-item pacing, stop handling, the consecutive-failure
-breaker and the md5 dedupe (which also catches the same media ingested
-once per mode) are shared.
+Per-item pacing, the consecutive-failure breaker and the md5 / visual /
+caption dedupe are shared. When anonymous listing fails, the run fails
+with an actionable error (retry later / check the proxy pool) instead
+of burning a session.
 """
 import datetime as dt
 import hashlib
@@ -188,35 +190,30 @@ def _finish(s, source, status, error: "str | None" = None):
 
 @celery.task(name="tasks.source_tasks.ingest_source", bind=True)
 def ingest_source(self, source_id: int):
-    """Beat/API entry: ingest one page until max reached, cursor exhausted,
-    stopped, or aborted. Resumable via end_cursor + SourceItem dedupe.
+    """Beat/API entry: list a public page anonymously and pull new reels.
 
-    The authed listing runs in two phases per run:
-      1. "what's new" — page newest-first until a whole page brings nothing
-         new (everything older was seen before). end_cursor is NOT persisted
-         here.
-      2. "backfill" — resume from the persisted end_cursor toward older posts
-         (or where phase 1 left off when the source never backfilled before).
-    end_cursor advances only past fully-processed pages, so a cap/stop/crash
-    mid-page re-lists that page next run and the SourceItem dedupe heals it.
+    Anonymous-only, by design: no account, no session file, no login —
+    ever. Bulk listing/downloads through a session is the pattern
+    Instagram flags as scraping. A failed anonymous listing fails the run
+    (retry later / check the proxy pool) instead of burning a session.
+
+    Resumable via SourceItem dedupe: a re-run never re-downloads a video
+    no matter what an earlier run already listed.
     """
     from sqlalchemy import select
 
     from app.config import settings
-    from app.core.security import decrypt_secret
     from app.database import SyncSessionLocal
     from app.models import (
-        Account, AccountStatus, SourceItem, SourceItemStatus, SourceStatus, Video, VideoStatus,
-        VideoSource,
+        SourceItem, SourceItemStatus, SourceStatus, Video, VideoSource,
     )
     from app.services import anon_ingest
     from app.services import media_hash as mh
-    from app.services.instagram_service import InstagramService, _classify
+    from app.services.instagram_service import _classify
     from app.services.video_processor import media_dirs
     from app.tasks import sync_helpers as sched
     from app.tasks.sync_helpers import log_event_sync
     from app.utils import ffmpeg as ff
-    from app.utils.instagram_helpers import session_path_for
 
     def fail(s, source, error: str):
         _finish(s, source, SourceStatus.failed, error)
@@ -230,26 +227,14 @@ def ingest_source(self, source_id: int):
             if source.status != SourceStatus.running:
                 return {"status": source.status.value, "note": "not claimed"}
             _bump(s, source, started_at=_now(), finished_at=None, last_error=None,
-                  current_stage="resolving download account")
+                  current_stage="preparing anonymous pull")
 
-            # --- download account: now OPTIONAL (anonymous goes first).
-            acc = None
-            if source.account_id:
-                acc = s.get(Account, source.account_id)
-                if acc is None:
-                    return fail(s, source, "Download account deleted — pick another or clear it for anonymous-only")
-            else:
-                cands = s.execute(
-                    select(Account).where(Account.status == AccountStatus.active)
-                    .order_by(Account.id)
-                ).scalars().all()
-                for c in cands:
-                    if os.path.exists(session_path_for(c.username, settings.MEDIA_ROOT)):
-                        acc = c
-                        break
-            # Proxy (when we have one) helps anonymous pulls too — a clean
-            # proxy IP often passes the listing endpoint our datacenter IP fails.
-            purl = sched.resolve_proxy_url(s, acc) if acc is not None else None
+            # --- proxy for anonymous pulls (no account involved): a clean
+            # proxy IP often passes the listing endpoint our datacenter IP
+            # fails. Best healthy spare from the pool; None = direct.
+            from app.services.proxy_service import proxy_url_for
+
+            purl = proxy_url_for(sched.pick_spare_proxy(s))
 
             dirs = media_dirs()
             max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
@@ -458,275 +443,24 @@ def ingest_source(self, source_id: int):
                 return {"source_id": source_id, "status": "completed",
                         "mode": "anonymous", "downloaded_this_run": run_downloaded}
 
-            # --- anonymous listing didn't deliver: figure out why, then authed.
+            # --- anonymous listing didn't deliver: fail cleanly. Source
+            # ingest is anonymous-only by design and NEVER falls back to
+            # an account session — bulk listing/downloads through a session
+            # is exactly the pattern Instagram flags as scraping, and it
+            # already cost us killed sessions.
             if anon_err is not None:
                 akind = anon_err.split(":", 1)[0]
                 log.warning("source %s anonymous listing failed: %s", source_id, anon_err)
                 if akind == "not-found":
                     return fail(s, source, anon_err)
-                # private pages CAN work with a follower account — fall through.
-            if acc is None:
-                hint = anon_err or "anonymous listing came back empty"
-                return fail(s, source,
-                            f"{hint} — and no download account is configured. "
-                            "Add an account session, or retry later (listing is IP-rate-limited)")
-            if acc.status != AccountStatus.active:
-                return fail(s, source,
-                            f"Download account @{acc.username} is not active and anonymous listing failed"
-                            f" ({anon_err})")
-
-            # --- authed mode: session lists, but BYTES still go anonymous first.
-            if not sched.account_reachable(s, acc):
-                return fail(s, source, "No healthy proxy route for the download account")
-            username, password = acc.username, decrypt_secret(acc.password_enc)
-            purl = sched.resolve_proxy_url(s, acc)
-            spath = acc.session_file_path or session_path_for(username, settings.MEDIA_ROOT)
-            if not os.path.exists(spath):
-                return fail(s, source, f"Download account @{username} has no session file")
-
-            svc = InstagramService(proxy_url=purl, session_path=spath)
-            cl = svc._make_client(username, request_timeout=60)
-            # Session-first check via the shared helper (same as profile ops).
-            from app.services.instagram_service import _feed_with_retry
-
-            feed_ok, feed_kind = _feed_with_retry(cl)
-            if not feed_ok:
-                try:
-                    cl.login(username, password)
-                    try:
-                        cl.dump_settings(spath)
-                    except Exception:
-                        pass
-                except Exception as exc:
-                    return fail(s, source, f"login failed: {_classify(exc)}: {exc}")
-
-            # --- resolve the target page.
-            _bump(s, source, current_stage=f"resolving @{source.username}")
-            try:
-                target_id = cl.user_id_from_username(source.username)
-            except Exception as exc:
-                return fail(s, source, f"page @{source.username} not found: {_classify(exc)}: {exc}")
-            try:
-                info = cl.user_info(target_id)
-            except Exception as exc:
-                return fail(s, source, f"could not read page: {_classify(exc)}: {exc}")
-            if getattr(info, "is_private", False):
-                return fail(s, source, f"@{source.username} is private — follow it from the official app first")
-
-            run_downloaded = 0
-            consec_fail = 0
-
-            def run_phase(start_cursor, *, stop_on_known, persist_cursor, stage):
-                """Page the listing oldestward from start_cursor, processing
-                each media. Returns (cursor_after_last_page, outcome).
-
-                outcome: 'exhausted' (no older posts), 'capped' (run cap
-                reached), 'stopped' (user stop) or 'caught_up' (only when
-                stop_on_known: a whole page had nothing new — everything
-                older was seen before). Raises _RunFailed on fatal errors.
-
-                end_cursor is persisted only after a page is FULLY processed,
-                so a cap/stop/crash mid-page re-lists that page next run and
-                the SourceItem dedupe heals it — no video is ever skipped
-                because an earlier run stopped halfway through its page.
-                """
-                nonlocal run_downloaded, consec_fail
-                cursor = start_cursor
-                last_cursor = None
-                page = 0
-                exhausted = False
-                seen_cursors: set = set()
-                while True:
-                    if _stopped(s, source_id):
-                        return last_cursor, "stopped"
-                    if run_downloaded >= cap:
-                        return last_cursor, "capped"
-                    page += 1
-                    _bump(s, source,
-                          current_stage=f"{stage} @{source.username} (page {page})")
-                    try:
-                        medias, cursor = cl.user_medias_paginated(
-                            target_id, PAGE_SIZE, end_cursor=cursor or "")
-                    except Exception as exc:
-                        kind = _classify(exc)
-                        if kind in ("challenge", "login_required"):
-                            raise _RunFailed(
-                                fail(s, source, f"listing blocked ({kind}): {exc}"))
-                        consec_fail += 1
-                        if consec_fail >= MAX_CONSECUTIVE_FAILURES:
-                            raise _RunFailed(
-                                fail(s, source, f"listing failed {consec_fail}x: {exc}"))
-                        _sleep_chunked(s, source_id, 30)
-                        continue
-                    consec_fail = 0
-                    if not medias:
-                        return last_cursor, "exhausted"
-                    # NOTE: end_cursor is deliberately NOT persisted here (see
-                    # docstring) — only `fetched` moves yet.
-                    _bump(s, source, fetched=(source.fetched or 0) + len(medias))
-                    if not cursor or cursor in seen_cursors:
-                        # Falsy cursor = last page; repeated cursor = API loop —
-                        # process this page, then stop instead of paging forever.
-                        exhausted = True
-                    seen_cursors.add(cursor)
-                    last_cursor = cursor
-
-                    page_had_unknown = False
-                    for m in medias:
-                        if _stopped(s, source_id):
-                            return last_cursor, "stopped"
-                        if run_downloaded >= cap:
-                            return last_cursor, "capped"
-                        pk = str(getattr(m, "pk", "") or "")
-                        if not pk:
-                            continue
-                        shortcode = getattr(m, "code", None)
-                        if _media_known(s, source_id, pk, shortcode):
-                            continue
-                        page_had_unknown = True
-                        mtype = getattr(m, "media_type", 0) or 0
-                        ptype = getattr(m, "product_type", "") or ""
-                        item = SourceItem(source_id=source_id, media_pk=pk,
-                                          shortcode=shortcode, media_type=str(mtype))
-                        s.add(item)
-                        s.commit()
-
-                        take, reason = should_take_media(mtype, ptype, source.reels_only)
-                        if not take:
-                            skip_item(item, reason)
-                            _publish(source_id)
-                            continue
-
-                        item.status = SourceItemStatus.downloading
-                        s.commit()
-                        _bump(s, source, current_stage=f"downloading @{source.username} #{shortcode or pk}")
-                        # Bytes go anonymous first — the session only lists.
-                        got_path = None
-                        cover_src = None
-                        cdir = None
-                        dl_dir = None
-                        try:
-                            from pathlib import Path
-
-                            try:
-                                pk_int = int(pk)
-                            except (TypeError, ValueError):
-                                raise ValueError(f"unparseable media pk {pk!r}")
-                            dl_dir = str(Path(dirs["raw"]) / f"src_{source_id}_{pk}")
-                            os.makedirs(dl_dir, exist_ok=True)
-                            caption = (getattr(m, "caption_text", "") or "")[:4000] or None
-                            if shortcode:
-                                res, _anon_err = anon_ingest.download_post(
-                                    shortcode, dl_dir, proxy=purl,
-                                    with_cover=source.with_covers)
-                                if res is not None:
-                                    got_path, cover_src = res["video"], res["cover"]
-                                    caption = res["caption"] or caption
-                            if got_path is None:
-                                try:
-                                    if ptype.lower() == "clips":
-                                        got = cl.clip_download(pk_int, Path(dl_dir))
-                                    else:
-                                        got = cl.video_download(pk_int, Path(dl_dir))
-                                except AttributeError:
-                                    # Older instagrapi without clip_download: fall back.
-                                    got = cl.video_download(pk_int, Path(dl_dir))
-                                got_path = str(got)
-                                # Cover = the post's own IG cover art.
-                                if source.with_covers:
-                                    try:
-                                        from pathlib import Path as _Path
-
-                                        cdir = str(_Path(dirs["thumbnails"]) / f"srccov_{source_id}_{pk}")
-                                        os.makedirs(cdir, exist_ok=True)
-                                        cgot = str(cl.photo_download(pk_int, _Path(cdir)))
-                                        cover_src = cgot
-                                    except Exception as exc:
-                                        log.warning("source %s cover failed for %s: %s", source_id, pk, exc)
-                            fname = f"{source.username}_{shortcode or pk}.mp4"[:500]
-                            vid = finalize(item, got_path, [d for d in (dl_dir, cdir) if d],
-                                           fname, caption, cover_src)
-                            mark_downloaded(item, vid, fname)
-                            run_downloaded += 1
-                            consec_fail = 0
-                        except _Duplicate as dup:
-                            skip_item(item, str(dup))
-                        except Exception as exc:
-                            kind = _classify(exc)
-                            if kind in ("challenge", "login_required"):
-                                raise _RunFailed(
-                                    fail(s, source, f"download blocked ({kind}): {exc}"))
-                            consec_fail = fail_item(item, kind, str(exc), consec_fail, dl_dir, cdir)
-                            if consec_fail >= MAX_CONSECUTIVE_FAILURES:
-                                raise _RunFailed(fail(
-                                    s, source,
-                                    f"{consec_fail} consecutive failures, stopping to protect the account: {exc}"))
-                        _publish(source_id)
-                        if pacing():
-                            return last_cursor, "stopped"
-
-                    # The page is fully processed: only now may the backfill
-                    # cursor advance past it (phase 2). A cap/stop/crash
-                    # mid-page leaves end_cursor behind, so the page is
-                    # re-listed next run and dedupe heals the gap.
-                    if persist_cursor:
-                        _bump(s, source, end_cursor=last_cursor)
-                    if exhausted:
-                        return last_cursor, "exhausted"
-                    if stop_on_known and not page_had_unknown:
-                        # Phase 1 pages newest-first: a whole page with
-                        # nothing new means everything older was seen before.
-                        return last_cursor, "caught_up"
-
-            def stopped_result():
-                _bump(s, source, status=SourceStatus.idle, finished_at=_now(),
-                      current_stage=None)
-                log_event_sync("INFO", "source", f"Source @{source.username} stopped",
-                               {"source_id": source_id})
-                _publish(source_id)
-                return {"source_id": source_id, "status": "stopped"}
-
-            # --- phase 1: what's new -----------------------------------
-            # Page newest-first until a whole page brings nothing new (or the
-            # cap/listing ends). end_cursor is untouched: the backfill
-            # position belongs to phase 2.
-            try:
-                new_cursor, outcome = run_phase(
-                    "", stop_on_known=True, persist_cursor=False,
-                    stage="checking for new posts")
-            except _RunFailed as rf:
-                return rf.result
-            if outcome == "stopped":
-                return stopped_result()
-            if outcome == "capped":
-                _finish(s, source, SourceStatus.completed)
-                return {"source_id": source_id, "status": "completed",
-                        "mode": "authed", "exhausted": False,
-                        "downloaded_this_run": run_downloaded}
-            if outcome == "exhausted":
-                # The whole listing was walked: there is nothing older.
-                _finish(s, source, SourceStatus.completed)
-                return {"source_id": source_id, "status": "completed",
-                        "mode": "authed", "exhausted": True,
-                        "downloaded_this_run": run_downloaded}
-
-            # --- phase 2: backfill older posts --------------------------
-            # Resume from the persisted cursor. When the source never ran the
-            # backfill (e.g. only anonymous runs so far, which don't persist
-            # end_cursor), continue where phase 1 left off instead of
-            # re-listing the newest page.
-            try:
-                _, outcome = run_phase(
-                    source.end_cursor or new_cursor, stop_on_known=False,
-                    persist_cursor=True, stage="listing page")
-            except _RunFailed as rf:
-                return rf.result
-            if outcome == "stopped":
-                return stopped_result()
+                return fail(
+                    s, source,
+                    f"{anon_err} — source ingest never uses an account session; "
+                    "retry later or check the proxy pool health")
+            # No error and nothing listed: the page simply has nothing new.
             _finish(s, source, SourceStatus.completed)
-            return {"source_id": source_id, "status": "completed", "mode": "authed",
-                    "exhausted": outcome == "exhausted",
-                    "downloaded_this_run": run_downloaded}
+            return {"source_id": source_id, "status": "completed",
+                    "mode": "anonymous", "downloaded_this_run": 0}
     except Exception as exc:  # noqa: BLE001
         log.exception("ingest_source %s failed", source_id)
         try:

@@ -1,53 +1,30 @@
-"""Phase-1 "what's new" + backfill tests for ingest_source (authed path).
+"""Anonymous-only ingest tests for ingest_source.
 
-Each run first pages the listing newest-first until a whole page brings
-nothing new ("caught up"), then backfills older posts from the persisted
-end_cursor. end_cursor only advances past fully-processed pages, so a
-cap/stop/crash mid-page re-lists that page next run and the SourceItem
-dedupe heals it — no video is silently skipped.
+Source ingest is strictly anonymous: no account, no session file, no
+login — ever. When the anonymous listing fails, the run fails cleanly
+instead of falling back to an account session. (The old fallback burned
+sessions: bulk listing/downloads through a session is exactly the
+pattern Instagram flags as scraping, and it cost us killed sessions.)
 """
-import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 
-class _Media:
-    def __init__(self, i):
-        self.pk = str(1000 + i)
-        self.code = f"sc{i}"
-        self.media_type = 2
-        self.product_type = "clips"
-        self.caption_text = f"caption {i}"
+def _entries(*shortcodes, is_video=True, product_type="clips"):
+    return [
+        {"shortcode": sc, "is_video": is_video,
+         "product_type": product_type, "caption": None}
+        for sc in shortcodes
+    ]
 
 
-def _m(i):
-    return _Media(i)
-
-
-class _FakeClient:
-    """Scripted instagrapi stand-in: pages keyed by end_cursor."""
-
-    def __init__(self):
-        self.pages = {}
-        self.calls = []
-
-    def user_id_from_username(self, username):
-        return 999
-
-    def user_info(self, target_id):
-        return types.SimpleNamespace(is_private=False)
-
-    def user_medias_paginated(self, target_id, page_size, end_cursor=""):
-        self.calls.append(end_cursor)
-        return self.pages[end_cursor]
-
-    def clip_download(self, pk_int, path):
-        path = Path(path)
-        path.mkdir(parents=True, exist_ok=True)
-        dest = path / f"{pk_int}.mp4"
-        dest.write_bytes(b"FAKEVIDEO-" + str(pk_int).encode())
-        return dest
+def _fake_download_ok(shortcode, dest_dir, **kw):
+    p = Path(dest_dir) / f"{shortcode}.mp4"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"FAKEVIDEO-" + shortcode.encode())
+    return ({"caption": None, "video": str(p), "cover": None}, None)
 
 
 @pytest.fixture()
@@ -75,26 +52,28 @@ def env(monkeypatch, tmp_path):
     maker = sessionmaker(bind=engine)
     monkeypatch.setattr(db_module, "SyncSessionLocal", maker)
 
-    client = _FakeClient()
+    # The trap: an ACTIVE account with a valid session file on disk.
+    # The old code auto-picked it as the download account; the new code
+    # must never touch it, even when anonymous listing fails.
+    from app.config import settings
 
-    class _FakeService:
-        def __init__(self, proxy_url=None, session_path=None):
-            pass
-
-        def _make_client(self, username, request_timeout=60):
-            return client
-
-    import app.services.instagram_service as ig_mod
-
-    monkeypatch.setattr(ig_mod, "InstagramService", _FakeService)
-    monkeypatch.setattr(ig_mod, "_feed_with_retry", lambda cl: (True, "ok"))
+    s = maker()
+    acc = Account(username="dlacc", password_enc=encrypt_secret("pw"),
+                  status=AccountStatus.active)
+    s.add(acc)
+    s.commit()
+    acc_id = acc.id
+    spath = session_path_for("dlacc", settings.MEDIA_ROOT)
+    Path(spath).write_text("{}")
+    s.close()
 
     import app.services.anon_ingest as anon_mod
 
     monkeypatch.setattr(
-        anon_mod, "list_public_posts", lambda *a, **k: ([], "429: rate limited"))
+        anon_mod, "list_public_posts", lambda *a, **k: ([], None))
     monkeypatch.setattr(
-        anon_mod, "download_post", lambda *a, **k: (None, "anon unavailable"))
+        anon_mod, "download_post",
+        lambda *a, **k: (None, "download_post not mocked for this test"))
 
     import app.services.video_processor as vp_mod
 
@@ -115,27 +94,17 @@ def env(monkeypatch, tmp_path):
 
     import app.tasks.sync_helpers as sched_mod
 
-    monkeypatch.setattr(sched_mod, "account_reachable", lambda s, acc: True)
-    monkeypatch.setattr(sched_mod, "resolve_proxy_url", lambda s, acc: None)
-
-    from app.config import settings
-
-    s = maker()
-    acc = Account(username="dlacc", password_enc=encrypt_secret("pw"),
-                  status=AccountStatus.active)
-    s.add(acc)
-    s.commit()
-    spath = session_path_for("dlacc", settings.MEDIA_ROOT)
-    Path(spath).write_text("{}")
-    s.close()
+    # No proxy in tests by default; individual tests override.
+    monkeypatch.setattr(sched_mod, "pick_spare_proxy", lambda s, **k: None)
 
     class Env:
-        def make_source(self, max_items=20):
+        def make_source(self, max_items=20, account_id=None):
             s = maker()
             src = VideoSource(
                 username="somepage", status=SourceStatus.running,
                 max_items=max_items, reels_only=True, with_covers=False,
-                auto_process=False, delay_min_s=0, delay_max_s=0)
+                auto_process=False, delay_min_s=0, delay_max_s=0,
+                account_id=account_id)
             s.add(src)
             s.commit()
             sid = src.id
@@ -173,146 +142,174 @@ def env(monkeypatch, tmp_path):
             s.close()
             return src
 
-        def seed_anon_row(self, sid, shortcode):
-            s = maker()
-            s.add(SourceItem(source_id=sid, media_pk=shortcode,
-                             shortcode=shortcode, media_type="2",
-                             status=SourceItemStatus.downloaded))
-            s.commit()
-            s.close()
-
     e = Env()
-    e.client = client
+    e.account_id = acc_id
     e._maker = maker
     return e
 
 
-class TestWhatsNewPhase:
-    def test_rerun_fetches_new_posts_then_backfills(self, env):
-        sid = env.make_source(max_items=12)
-        p1 = [_m(i) for i in range(1, 13)]
-        env.client.pages = {
-            "": (p1, "c1"),
-            "c1": ([_m(i) for i in range(13, 17)], "c2"),
-            "c2": ([], ""),
-        }
-        r1 = env.run(sid)
-        assert r1["status"] == "completed"
-        assert r1["downloaded_this_run"] == 12
-        # Phase 1 never persists end_cursor.
-        assert env.get_source(sid).end_cursor is None
+class TestAnonymousIngest:
+    def test_successful_run_downloads_new_reels(self, env, monkeypatch):
+        import app.services.anon_ingest as anon_mod
 
-        n1, n2 = _m(101), _m(102)
-        env.client.pages = {
-            "": ([n1, n2] + p1, "c0"),
-            "c0": (p1, "c1"),
-            "c1": ([_m(i) for i in range(21, 25)], "c2"),
-            "c2": ([], ""),
-        }
-        env.reset_running(sid)
-        env.client.calls.clear()
-        r2 = env.run(sid)
-
-        assert r2["status"] == "completed"
-        # 2 brand-new posts + 4 older ones the first run never reached.
-        assert r2["downloaded_this_run"] == 6
-        assert env.video_count() == 18
-        assert env.item_count(sid) == 18
-        # Backfill cursor advanced past the fully-processed page.
-        assert env.get_source(sid).end_cursor == "c2"
-        # Phase 1 checked the head, phase 2 the tail — nothing re-downloaded.
-        assert env.client.calls == ["", "c0", "c1", "c2"]
-
-    def test_midpage_cap_gap_is_healed_next_run(self, env):
-        # max_items < PAGE_SIZE: run 1 stops mid-page; those videos must not
-        # be lost (the pre-existing per-page cursor bug this fixes).
-        sid = env.make_source(max_items=12)
-        page1 = [_m(i) for i in range(1, 21)]
-        env.client.pages = {"": (page1, "c1"), "c1": ([], "")}
-        r1 = env.run(sid)
-        assert r1["downloaded_this_run"] == 12
-
-        env.client.pages = {
-            "": (page1, "c1"),
-            "c1": ([_m(i) for i in range(21, 25)], "c2"),
-            "c2": ([], ""),
-        }
-        env.reset_running(sid)
-        env.client.calls.clear()
-        r2 = env.run(sid)
-
-        # The 8 unprocessed items of run 1's page are picked up, then 4 older.
-        assert r2["downloaded_this_run"] == 12
-        assert env.video_count() == 24
-        assert env.item_count(sid) == 24
-
-    def test_tiny_source_exhausts_without_backfill(self, env):
+        monkeypatch.setattr(anon_mod, "list_public_posts",
+                            lambda *a, **k: (_entries("sc1", "sc2", "sc3"), None))
+        monkeypatch.setattr(anon_mod, "download_post", _fake_download_ok)
         sid = env.make_source(max_items=20)
-        env.client.pages = {"": ([_m(1), _m(2), _m(3)], "")}
         r = env.run(sid)
         assert r["status"] == "completed"
+        assert r["mode"] == "anonymous"
         assert r["downloaded_this_run"] == 3
-        assert r["exhausted"] is True
-        # One listing call total — no redundant backfill phase.
-        assert env.client.calls == [""]
-        assert env.get_source(sid).end_cursor is None
+        assert env.video_count() == 3
+        assert env.item_count(sid) == 3
+        assert env.get_source(sid).status.value == "completed"
 
-    def test_cross_mode_shortcode_rows_are_recognized(self, env):
-        # Rows written by anonymous runs use the shortcode as media_pk.
+    def test_rerun_skips_already_seen(self, env, monkeypatch):
+        import app.services.anon_ingest as anon_mod
+
+        monkeypatch.setattr(anon_mod, "download_post", _fake_download_ok)
+        monkeypatch.setattr(anon_mod, "list_public_posts",
+                            lambda *a, **k: (_entries("sc1", "sc2"), None))
         sid = env.make_source(max_items=20)
-        env.seed_anon_row(sid, "sc1")
-        env.seed_anon_row(sid, "sc2")
-        env.client.pages = {
-            "": ([_m(1), _m(2)], "c1"),
-            "c1": ([_m(3), _m(4)], "c2"),
-            "c2": ([], ""),
-        }
+        r1 = env.run(sid)
+        assert r1["downloaded_this_run"] == 2
+
+        # Second run lists sc1..sc3: only sc3 is new.
+        monkeypatch.setattr(anon_mod, "list_public_posts",
+                            lambda *a, **k: (_entries("sc1", "sc2", "sc3"), None))
+        env.reset_running(sid)
+        r2 = env.run(sid)
+        assert r2["status"] == "completed"
+        assert r2["downloaded_this_run"] == 1
+        assert env.video_count() == 3
+        assert env.item_count(sid) == 3
+
+    def test_photos_and_non_reels_are_skipped(self, env, monkeypatch):
+        import app.services.anon_ingest as anon_mod
+
+        from app.models import SourceItem, SourceItemStatus
+
+        monkeypatch.setattr(
+            anon_mod, "list_public_posts",
+            lambda *a, **k: (
+                _entries("photo1", is_video=False)
+                + _entries("feedvid", product_type="feed")
+                + _entries("reel1"),
+                None))
+        monkeypatch.setattr(anon_mod, "download_post", _fake_download_ok)
+        sid = env.make_source(max_items=20)
         r = env.run(sid)
         assert r["status"] == "completed"
-        # m1/m2 recognized via shortcode — not re-downloaded; m3/m4 fetched.
-        assert r["downloaded_this_run"] == 2
-        assert env.video_count() == 2
+        assert r["downloaded_this_run"] == 1
+        assert env.video_count() == 1
         s = env._maker()
-        from app.models import SourceItem
-
-        assert s.query(SourceItem).filter_by(
-            source_id=sid, media_pk="1001").count() == 0
+        skipped = s.query(SourceItem).filter_by(
+            source_id=sid, status=SourceItemStatus.skipped).count()
+        assert skipped == 2
         s.close()
 
-    def test_no_new_posts_backfills_from_cursor(self, env):
-        sid = env.make_source(max_items=20)
-        p1 = [_m(i) for i in range(1, 13)]
-        p2 = [_m(i) for i in range(13, 21)]
-        env.client.pages = {"": (p1, "c1"), "c1": (p2, "c2"), "c2": ([], "")}
-        r1 = env.run(sid)
-        assert r1["downloaded_this_run"] == 20
-
-        # Nothing new: phase 1 sees a fully-known head page and stops after it.
-        env.client.pages = {
-            "": (p1, "c0"),
-            "c0": (p1 + p2, "c1"),
-            "c1": ([_m(i) for i in range(21, 25)], "c2"),
-            "c2": ([], ""),
-        }
-        env.reset_running(sid)
-        env.client.calls.clear()
-        r2 = env.run(sid)
-        assert r2["downloaded_this_run"] == 4
-        assert env.video_count() == 24
-        assert env.client.calls == ["", "c0", "c1", "c2"]
-
-    def test_stop_mid_run(self, env, monkeypatch):
-        from app.tasks import source_tasks
-
-        sid = env.make_source(max_items=20)
-        env.client.pages = {"": ([_m(i) for i in range(1, 6)], "c1")}
-        monkeypatch.setattr(source_tasks, "_stopped", lambda s, sid_: True)
+    def test_empty_listing_completes_with_zero(self, env):
+        # ([], None) is the fixture default: nothing new, no error.
+        sid = env.make_source()
         r = env.run(sid)
-        assert r["status"] == "stopped"
-        from app.models import SourceStatus
-
-        assert env.get_source(sid).status == SourceStatus.idle
+        assert r["status"] == "completed"
+        assert r["mode"] == "anonymous"
+        assert r["downloaded_this_run"] == 0
         assert env.video_count() == 0
+
+    def test_anon_429_fails_without_account_fallback(self, env, monkeypatch):
+        # The core regression: anonymous listing 429'd AND an active
+        # account with a session file exists (source even pinned to it).
+        # The run must fail cleanly — never burn the session.
+        import app.services.anon_ingest as anon_mod
+
+        monkeypatch.setattr(anon_mod, "list_public_posts",
+                            lambda *a, **k: ([], "429: rate limited"))
+        sid = env.make_source(account_id=env.account_id)
+        r = env.run(sid)
+        assert r["status"] == "failed"
+        assert "never uses an account session" in r["error"]
+        assert env.video_count() == 0
+        assert env.item_count(sid) == 0
+        assert env.get_source(sid).status.value == "failed"
+
+    def test_not_found_fails_cleanly(self, env, monkeypatch):
+        import app.services.anon_ingest as anon_mod
+
+        monkeypatch.setattr(anon_mod, "list_public_posts",
+                            lambda *a, **k: ([], "not-found: page does not exist"))
+        sid = env.make_source()
+        r = env.run(sid)
+        assert r["status"] == "failed"
+        assert "not-found" in r["error"]
+
+    def test_consecutive_failures_abort_the_run(self, env, monkeypatch):
+        import app.services.anon_ingest as anon_mod
+
+        monkeypatch.setattr(
+            anon_mod, "list_public_posts",
+            lambda *a, **k: (_entries(*[f"bad{i}" for i in range(7)]), None))
+        monkeypatch.setattr(
+            anon_mod, "download_post", lambda *a, **k: (None, "boom: denied"))
+        sid = env.make_source(max_items=20)
+        r = env.run(sid)
+        assert r["status"] == "failed"
+        assert "5 consecutive failures" in r["error"]
+        assert env.video_count() == 0
+        assert env.get_source(sid).failed_count == 5
+
+    def test_instagram_service_is_never_instantiated(self, env, monkeypatch):
+        # Tripwire: if any future change reintroduces session usage in
+        # source ingest, this blows up instead of silently burning it.
+        import app.services.anon_ingest as anon_mod
+        import app.services.instagram_service as ig_mod
+
+        def _bomb(*a, **k):
+            raise AssertionError(
+                "source ingest must never instantiate InstagramService")
+
+        monkeypatch.setattr(ig_mod, "InstagramService", _bomb)
+
+        # Happy path…
+        monkeypatch.setattr(anon_mod, "list_public_posts",
+                            lambda *a, **k: (_entries("sc1"), None))
+        monkeypatch.setattr(anon_mod, "download_post", _fake_download_ok)
+        sid = env.make_source(account_id=env.account_id)
+        r = env.run(sid)
+        assert r["status"] == "completed"
+
+        # …and the failure path (anonymous 429 with a pinned account).
+        monkeypatch.setattr(anon_mod, "list_public_posts",
+                            lambda *a, **k: ([], "429: rate limited"))
+        env.reset_running(sid)
+        r = env.run(sid)
+        assert r["status"] == "failed"
+
+    def test_spare_proxy_routes_anon_traffic(self, env, monkeypatch):
+        import app.services.anon_ingest as anon_mod
+        import app.tasks.sync_helpers as sched_mod
+
+        seen = {}
+        fake_proxy = SimpleNamespace(url="http://spare:8080", username=None)
+        monkeypatch.setattr(
+            sched_mod, "pick_spare_proxy", lambda s, **k: fake_proxy)
+
+        def fake_list(username, limit=None, proxy=None, **k):
+            seen["list_proxy"] = proxy
+            return (_entries("sc1"), None)
+
+        def fake_dl(shortcode, dest_dir, proxy=None, **k):
+            seen["dl_proxy"] = proxy
+            return _fake_download_ok(shortcode, dest_dir)
+
+        monkeypatch.setattr(anon_mod, "list_public_posts", fake_list)
+        monkeypatch.setattr(anon_mod, "download_post", fake_dl)
+        sid = env.make_source()
+        r = env.run(sid)
+        assert r["status"] == "completed"
+        assert r["downloaded_this_run"] == 1
+        assert seen["list_proxy"] == "http://spare:8080"
+        assert seen["dl_proxy"] == "http://spare:8080"
 
 
 class TestMediaKnown:
@@ -342,44 +339,14 @@ class TestMediaKnown:
         s.close()
 
 
-class TestFreshBugRegressions:
-    def test_bad_pk_fails_one_item_not_the_run(self, env):
-        # m10: int(pk) used to sit outside the per-item try — one malformed
-        # pk killed the whole run. Now only that item fails.
-        sid = env.make_source(max_items=20)
-
-        class _BadPk:
-            pk = "not_a_number"
-            code = "scbad"
-            media_type = 2
-            product_type = "clips"
-            caption_text = "bad"
-
-        env.client.pages = {"": ([_BadPk(), _m(1), _m(2)], "")}
-        r = env.run(sid)
-        assert r["status"] == "completed"
-        assert r["downloaded_this_run"] == 2
-        assert env.video_count() == 2
-        s = env._maker()
-        from app.models import SourceItem, SourceItemStatus
-
-        bad = s.query(SourceItem).filter_by(source_id=sid, media_pk="not_a_number").one()
-        assert bad.status == SourceItemStatus.failed
-        assert "unparseable media pk" in (bad.error or "")
-        s.close()
-
+class TestStopHandling:
     def test_stop_in_anonymous_phase_reports_stopped(self, env, monkeypatch):
         # The anonymous loop used to report "completed" on user stop.
         import app.services.anon_ingest as anon_mod
         from app.tasks import source_tasks
 
-        entries = [
-            {"shortcode": f"sc{i}", "is_video": True,
-             "product_type": "clips", "caption": None}
-            for i in range(1, 4)
-        ]
         monkeypatch.setattr(anon_mod, "list_public_posts",
-                            lambda *a, **k: (entries, None))
+                            lambda *a, **k: (_entries("sc1", "sc2", "sc3"), None))
         monkeypatch.setattr(source_tasks, "_stopped", lambda s, sid_: True)
         sid = env.make_source(max_items=20)
         r = env.run(sid)
@@ -396,21 +363,9 @@ class TestFreshBugRegressions:
         import app.services.anon_ingest as anon_mod
         from app.tasks import source_tasks
 
-        entries = [
-            {"shortcode": f"psc{i}", "is_video": True,
-             "product_type": "clips", "caption": None}
-            for i in range(1, 4)
-        ]
         monkeypatch.setattr(anon_mod, "list_public_posts",
-                            lambda *a, **k: (entries, None))
-
-        def fake_download(sc, dl_dir, **k):
-            p = Path(dl_dir) / f"{sc}.mp4"
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_bytes(b"FAKEVIDEO-" + sc.encode())
-            return ({"caption": None, "video": str(p), "cover": None}, None)
-
-        monkeypatch.setattr(anon_mod, "download_post", fake_download)
+                            lambda *a, **k: (_entries("psc1", "psc2", "psc3"), None))
+        monkeypatch.setattr(anon_mod, "download_post", _fake_download_ok)
 
         # _stopped: False for the loop-entry check of item 1, True from the
         # pacing() call after its download (stop lands between items).
@@ -438,14 +393,9 @@ class TestOrphanCleanup:
         be removed too — not orphaned."""
         import app.services.anon_ingest as anon_mod
 
-        entries = [{
-            "shortcode": "orphan1",
-            "is_video": True,
-            "product_type": "clips",
-            "caption": "some caption",
-        }]
         monkeypatch.setattr(
-            anon_mod, "list_public_posts", lambda *a, **k: (entries, None))
+            anon_mod, "list_public_posts",
+            lambda *a, **k: (_entries("orphan1"), None))
 
         def _fake_download(shortcode, dest_dir, **kw):
             v = tmp_path / "dl_v.mp4"
@@ -469,7 +419,6 @@ class TestOrphanCleanup:
         sid = src.id
         s.close()
 
-        from pathlib import Path
         r = env.run(sid)
         assert r["status"] == "completed"
 

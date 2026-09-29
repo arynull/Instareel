@@ -412,7 +412,9 @@ class TestResources:
         assert c.post("/api/v1/sources", json={"username": "a", "max_items": 0}).status_code == 422
         assert c.post("/api/v1/sources", json={"username": "a", "max_items": 201}).status_code == 422
         assert c.post("/api/v1/sources", json={"username": "a", "delay_min_s": 10, "delay_max_s": 5}).status_code == 422
-        assert c.post("/api/v1/sources", json={"username": "a", "account_id": 999}).status_code == 404
+        # account_id is no longer part of the contract: source ingest is
+        # anonymous-only, so a stale client sending it is ignored, not 404.
+        assert c.post("/api/v1/sources", json={"username": "a", "account_id": 999}).status_code == 201
         r = c.post("/api/v1/sources", json={"username": "@UPPER.Case_9"})
         assert r.status_code == 201, r.text
         body = r.json()
@@ -441,7 +443,8 @@ class TestResources:
         r2 = c.post("/api/v1/sources", json={"username": "second.page"}).json()
         ok = c.put(f"/api/v1/sources/{r2['id']}", json={"max_items": 50, "reels_only": False})
         assert ok.status_code == 200 and ok.json()["max_items"] == 50
-        assert c.put(f"/api/v1/sources/{r2['id']}", json={"account_id": 999}).status_code == 404
+        # account_id ignored on update too (anonymous-only ingest).
+        assert c.put(f"/api/v1/sources/{r2['id']}", json={"account_id": 999}).status_code == 200
         assert c.delete(f"/api/v1/sources/{r2['id']}").status_code == 204
         assert c.get(f"/api/v1/sources/{r2['id']}").status_code == 404
 

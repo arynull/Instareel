@@ -63,10 +63,6 @@ async def get_source(sid: int, _: str = Depends(get_current_admin), db: AsyncSes
 
 @source_router.post("", response_model=SourceOut, status_code=201)
 async def create_source(body: SourceIn, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
-    from app.models import Account
-
-    if body.account_id is not None and await db.get(Account, body.account_id) is None:
-        raise HTTPException(404, "Download account not found")
     dup = (
         await db.execute(select(VideoSource).where(VideoSource.username == body.username))
     ).scalars().first()
@@ -82,15 +78,11 @@ async def create_source(body: SourceIn, _: str = Depends(get_current_admin), db:
 
 @source_router.put("/{sid}", response_model=SourceOut)
 async def update_source(sid: int, body: SourceUpdate, _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
-    from app.models import Account
-
     r = await db.get(VideoSource, sid)
     if not r:
         raise HTTPException(404, "Source not found")
     if r.status in (SourceStatus.running, SourceStatus.stopping):
         raise HTTPException(409, "Stop the source before changing its settings")
-    if body.account_id is not None and await db.get(Account, body.account_id) is None:
-        raise HTTPException(404, "Download account not found")
     # exclude_unset: a partial body must not clobber untouched fields with
     # schema defaults (e.g. {"max_items": 50} used to reset reels_only=True).
     for k, v in body.model_dump(exclude_unset=True).items():

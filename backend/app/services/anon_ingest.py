@@ -14,10 +14,12 @@ rate-limited by IP (often HTTP 429 from datacenter ranges) while
 single-post extraction stays tolerant. Consequences, encoded in the
 ingest task rather than hidden here:
 
-- anonymous listing is best-effort (newest first page only);
-  authenticated listing remains the fallback;
-- every per-item download tries anonymous FIRST even in authed mode,
-  so precious posting-account sessions are never burned on bulk bytes.
+- anonymous listing is best-effort (newest first page only); there is
+  deliberately NO authenticated fallback — source ingest never touches
+  an account session (bulk session usage is what Instagram flags as
+  scraping), so a failed listing fails the run instead;
+- every per-item download is anonymous via yt-dlp, so posting-account
+  sessions are never burned on bulk bytes.
 """
 import logging
 import os
@@ -85,9 +87,9 @@ def list_public_posts(username: str, limit: int = 25,
     if r.status_code == 404:
         return [], f"not-found: @{username} does not exist"
     if r.status_code == 429:
-        return [], "throttled: anonymous listing rate-limited (HTTP 429) — retry later or use a download account"
+        return [], "throttled: anonymous listing rate-limited (HTTP 429) — retry later"
     if r.status_code in (400, 401, 403):
-        return [], f"auth: anonymous listing refused (HTTP {r.status_code}) — will use a download account"
+        return [], f"auth: anonymous listing refused (HTTP {r.status_code})"
     if r.status_code != 200:
         return [], f"generic: anonymous listing HTTP {r.status_code}"
     try:
@@ -95,9 +97,9 @@ def list_public_posts(username: str, limit: int = 25,
     except Exception:
         user = None
     if not user:
-        return [], "auth: anonymous listing returned no profile — will use a download account"
+        return [], "auth: anonymous listing returned no profile"
     if user.get("is_private"):
-        return [], f"private: @{username} is private — needs a download account that follows it"
+        return [], f"private: @{username} is private — anonymous ingest only supports public pages"
     timeline = user.get("edge_owner_to_timeline_media") or {}
     edges = timeline.get("edges") or []
     items: "list[dict]" = []

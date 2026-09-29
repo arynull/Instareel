@@ -3,9 +3,9 @@ import { useState } from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardTitle, EmptyState, Field, QueryFailed, Spinner } from "@/components/ui";
-import { useAccounts, useApiMutation } from "@/hooks/use-api";
+import { useApiMutation } from "@/hooks/use-api";
 import { api } from "@/lib/api";
-import type { Account, SourceItem, VideoSource } from "@/types/models";
+import type { SourceItem, VideoSource } from "@/types/models";
 
 function useVideoSources(refetchInterval: number | false) {
   return useQuery({
@@ -110,9 +110,8 @@ function ItemsView({ sourceId }: { sourceId: number }) {
   );
 }
 
-function EditForm({ src, accounts, onDone }: { src: VideoSource; accounts: Account[]; onDone: () => void }) {
+function EditForm({ src, onDone }: { src: VideoSource; onDone: () => void }) {
   const update = useApiMutation("put", [["video-sources"]], "Source updated");
-  const [acct, setAcct] = useState(src.account_id ? String(src.account_id) : "");
   const [maxItems, setMaxItems] = useState(src.max_items);
   const [dMin, setDMin] = useState(src.delay_min_s);
   const [dMax, setDMax] = useState(src.delay_max_s);
@@ -127,7 +126,6 @@ function EditForm({ src, accounts, onDone }: { src: VideoSource; accounts: Accou
     await update.mutateAsync({
       url: `/sources/${src.id}`,
       body: {
-        account_id: acct ? Number(acct) : null,
         max_items: maxItems, delay_min_s: dMin, delay_max_s: dMax,
         reels_only: reelsOnly, with_covers: withCovers, auto_process: autoProcess,
       },
@@ -149,14 +147,6 @@ function EditForm({ src, accounts, onDone }: { src: VideoSource; accounts: Accou
         </Field>
       </div>
       <div className="mt-2 flex min-w-0 flex-wrap gap-x-4 gap-y-1 text-xs">
-        <label className="flex items-center gap-1.5">Download account:
-          <select className="input !w-auto !py-1" value={acct} onChange={(e) => setAcct(e.target.value)}>
-            <option value="">Auto</option>
-            {accounts.map((a) => (
-              <option key={a.id} value={a.id}>@{a.username}{a.has_session ? " ✓" : ""}</option>
-            ))}
-          </select>
-        </label>
         <label className="flex items-center gap-1.5"><input type="checkbox" checked={reelsOnly} onChange={(e) => setReelsOnly(e.target.checked)} /> Reels only</label>
         <label className="flex items-center gap-1.5"><input type="checkbox" checked={withCovers} onChange={(e) => setWithCovers(e.target.checked)} /> With covers</label>
         <label className="flex items-center gap-1.5"><input type="checkbox" checked={autoProcess} onChange={(e) => setAutoProcess(e.target.checked)} /> Auto-process</label>
@@ -176,7 +166,7 @@ export default function SourcesPage() {
   const [expanded, setExpanded] = useState<number | null>(null);
   const [editing, setEditing] = useState<number | null>(null);
   const [form, setForm] = useState({
-    username: "", account_id: "", max_items: 50,
+    username: "", max_items: 50,
     reels_only: true, with_covers: true, auto_process: true,
     delay_min_s: 8, delay_max_s: 20,
   });
@@ -187,7 +177,6 @@ export default function SourcesPage() {
   const probeList = (probe ?? []) as VideoSource[];
   const anyBusy = probeList.some((s) => s.status === "running" || s.status === "stopping");
   const { data, isLoading, isError, refetch } = useVideoSources(anyBusy ? 3000 : 30000);
-  const { data: accounts } = useAccounts();
 
   const create = useApiMutation("post", [["video-sources"]], "Source added");
   const remove = useApiMutation("delete", [["video-sources"]], "Source deleted");
@@ -208,13 +197,12 @@ export default function SourcesPage() {
         url: "/sources",
         body: {
           username: form.username.trim(),
-          account_id: form.account_id ? Number(form.account_id) : null,
           max_items: form.max_items,
           reels_only: form.reels_only, with_covers: form.with_covers, auto_process: form.auto_process,
           delay_min_s: form.delay_min_s, delay_max_s: form.delay_max_s,
         },
       },
-      { onSuccess: () => setForm({ username: "", account_id: "", max_items: 50, reels_only: true, with_covers: true, auto_process: true, delay_min_s: 8, delay_max_s: 20 }) },
+      { onSuccess: () => setForm({ username: "", max_items: 50, reels_only: true, with_covers: true, auto_process: true, delay_min_s: 8, delay_max_s: 20 }) },
     );
   }
 
@@ -232,18 +220,6 @@ export default function SourcesPage() {
               onChange={(e) => setForm({ ...form, username: e.target.value })}
               placeholder="@username"
             />
-          </Field>
-          <Field label="Download account">
-            <select
-              className="input max-w-full"
-              value={form.account_id}
-              onChange={(e) => setForm({ ...form, account_id: e.target.value })}
-            >
-              <option value="">Auto</option>
-              {((accounts ?? []) as Account[]).map((a) => (
-                <option key={a.id} value={a.id}>@{a.username}{a.has_session ? " ✓" : ""}</option>
-              ))}
-            </select>
           </Field>
           <Field label="Max items (1–200)">
             <input className="input max-w-full" type="number" min={1} max={200} value={form.max_items} onChange={(e) => setForm({ ...form, max_items: Number(e.target.value) })} />
@@ -329,7 +305,7 @@ export default function SourcesPage() {
                 </p>
                 {s.current_stage && <p title={s.current_stage} className="mt-0.5 min-w-0 max-w-full truncate text-xs text-zinc-500">{s.current_stage}</p>}
                 {s.last_error && <p title={s.last_error} className="mt-0.5 min-w-0 max-w-full break-all text-xs text-red-500">{s.last_error}</p>}
-                {editing === s.id && !busy && <EditForm src={s} accounts={((accounts ?? []) as Account[])} onDone={() => setEditing(null)} />}
+                {editing === s.id && !busy && <EditForm src={s} onDone={() => setEditing(null)} />}
                 {expanded === s.id && <ItemsView sourceId={s.id} />}
               </Card>
             );
