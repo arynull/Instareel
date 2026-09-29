@@ -29,15 +29,40 @@ def _has_session_file(username: str, session_file_path: str | None) -> bool:
     return bool(path) and os.path.exists(path)
 
 
-def _out(a: Account) -> AccountOut:
+def _out(a: Account, stats: dict[int, tuple[int, int, int]] | None = None) -> AccountOut:
+    # Live aggregates from the Post rows: Account.total_views/total_likes are
+    # write-never columns (always 0), so the card must not read them.
+    n_posts, views, likes = (stats or {}).get(a.id, (0, 0, 0))
     return AccountOut(
         id=a.id, username=a.username, ig_user_id=a.ig_user_id, proxy_id=a.proxy_id, status=a.status.value,
         last_login=a.last_login, last_post=a.last_post, posts_today=a.posts_today,
         max_daily_posts=a.max_daily_posts, cooldown_until=a.cooldown_until,
-        total_posts=a.total_posts, total_views=a.total_views, total_likes=a.total_likes,
+        total_posts=n_posts, total_views=views, total_likes=likes,
         notes=a.notes, created_at=a.created_at, updated_at=a.updated_at,
         has_session=_has_session_file(a.username, a.session_file_path),
     )
+
+
+async def _account_post_stats(db: AsyncSession, account_id: int | None = None) -> dict[int, tuple[int, int, int]]:
+    """Per-account aggregates over posted posts: {account_id: (count, views, likes)}.
+
+    Same source of truth as overview/account_comparison (Post.views_7d is the
+    reels counter, see 0cfe59b). One grouped query — no per-account N+1.
+    """
+    q = (
+        select(
+            Post.account_id,
+            func.count(Post.id),
+            func.coalesce(func.sum(Post.views_7d), 0),
+            func.coalesce(func.sum(Post.likes_7d), 0),
+        )
+        .where(Post.status == PostStatus.posted)
+        .group_by(Post.account_id)
+    )
+    if account_id is not None:
+        q = q.where(Post.account_id == account_id)
+    rows = (await db.execute(q)).all()
+    return {r[0]: (r[1], int(r[2] or 0), int(r[3] or 0)) for r in rows}
 
 
 def _move_session_file(old_path: str | None, new_path: str) -> bool:
@@ -84,7 +109,8 @@ async def _rename_account(db: AsyncSession, acc: Account, new_username: str) -> 
 @router.get("", response_model=list[AccountOut])
 async def list_accounts(_: str = Depends(get_current_admin), db: AsyncSession = Depends(__import__("app.api.deps", fromlist=["get_db"]).get_db)):
     rows = (await db.execute(select(Account).order_by(Account.username))).scalars().all()
-    return [_out(a) for a in rows]
+    stats = await _account_post_stats(db)
+    return [_out(a, stats) for a in rows]
 
 
 @router.post("", response_model=AccountOut, status_code=201)
@@ -115,7 +141,7 @@ async def get_account(account_id: int, _: str = Depends(get_current_admin), db: 
     acc = await db.get(Account, account_id)
     if not acc:
         raise HTTPException(404, "Account not found")
-    return _out(acc)
+    return _out(acc, await _account_post_stats(db, account_id))
 
 
 @router.put("/{account_id}", response_model=AccountOut)
@@ -146,7 +172,7 @@ async def update_account(account_id: int, body: AccountUpdate, _: str = Depends(
             raise HTTPException(400, "Invalid status")
     await db.commit()
     await db.refresh(acc)
-    return _out(acc)
+    return _out(acc, await _account_post_stats(db, account_id))
 
 
 @router.post("/{account_id}/rename", response_model=AccountOut)
@@ -164,7 +190,7 @@ async def rename_account(
     await db.commit()
     await db.refresh(acc)
     await log_event("INFO", "account", f"Account renamed @{old} → @{acc.username}")
-    return _out(acc)
+    return _out(acc, await _account_post_stats(db, account_id))
 
 
 @router.delete("/{account_id}", status_code=204)
