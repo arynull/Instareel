@@ -13,6 +13,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const { setAuth } = useAuth();
   const [mounted, setMounted] = useState(false);
   const [verified, setVerified] = useState(false);
+  const [verifyFailed, setVerifyFailed] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -23,13 +24,27 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
     // Presence isn't validity: confirm the token with the API once, else an
     // expired token renders a broken dashboard of failing queries.
+    // A hard timeout keeps a never-settling verify request from becoming an
+    // eternal spinner (refresh used to sit on "loading" forever).
+    let done = false;
+    const timer = setTimeout(() => {
+      done = true;
+      setVerifyFailed(true);
+    }, 15000);
     api.get("/auth/me").then(
       () => {
+        if (done) return;
+        clearTimeout(timer);
         if (!useAuth.getState().username) setAuth(localStorage.getItem("username") ?? "admin");
         setVerified(true);
       },
-      () => router.replace("/login"),
+      () => {
+        if (done) return;
+        clearTimeout(timer);
+        router.replace("/login");
+      },
     );
+    return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -39,7 +54,21 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   useRealtimeFeed(!!token && verified);
 
   if (!mounted || !token) return null;
-  if (!verified) return <div className="flex min-h-screen items-center justify-center"><Spinner /></div>;
+  if (!verified) {
+    if (verifyFailed) {
+      return (
+        <div className="flex min-h-screen flex-col items-center justify-center gap-3 p-6 text-center">
+          <p className="text-sm text-zinc-600 dark:text-zinc-300">
+            Couldn&apos;t reach the server — check your connection and try again.
+          </p>
+          <button className="btn-primary" onClick={() => window.location.reload()}>
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return <div className="flex min-h-screen items-center justify-center"><Spinner /></div>;
+  }
 
   return (
     <div className="flex min-h-screen">

@@ -22,6 +22,7 @@ function Reel({
   const [inView, setInView] = useState(false);
   const [token, setToken] = useState<string | null>(null);
   const [tokenFailed, setTokenFailed] = useState(false);
+  const [tokenRetries, setTokenRetries] = useState(0);
   // Small poster while the stream token loads (thumbnail blobs are cheap;
   // the full video is never blob-downloaded — it streams via Range requests).
   // Lazy like the token: no fetch until the reel is on screen.
@@ -73,6 +74,17 @@ function Reel({
           controls
           playsInline
           preload="metadata"
+          onError={() => {
+            // Most likely cause: the 10-minute preview token expired while
+            // the tab sat open. Drop it so the effect above fetches a fresh
+            // one; give up after 2 tries (the file itself may be broken).
+            if (tokenRetries < 2) {
+              setTokenRetries((n) => n + 1);
+              setToken(null);
+            } else {
+              setTokenFailed(true);
+            }
+          }}
         />
       ) : (
         <div className="flex h-full items-center justify-center text-sm text-zinc-500">

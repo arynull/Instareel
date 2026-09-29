@@ -84,6 +84,7 @@ export function useBlobUrl(kind: "preview" | "thumbnail", id: number | null): { 
   useEffect(() => {
     if (!id) {
       setUrl(null);
+      setFailed(false);
       return;
     }
     let cancelled = false;

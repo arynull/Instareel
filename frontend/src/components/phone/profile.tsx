@@ -5,6 +5,7 @@ import { Clapperboard, Clock, FlaskConical, LayoutGrid } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Account, Bio, IgProfile, Post, Video } from "@/types/models";
 import { useBlobUrl } from "./blob";
+import { useInView } from "./use-in-view";
 import { comparePostRecency } from "./sort";
 
 function Avatar({ url, username, size }: { url: string | null; username: string; size: string }) {
@@ -27,9 +28,13 @@ function GridThumb({
   badge?: "scheduled" | "trial" | null;
   onPick: () => void;
 }) {
-  const { url, failed } = useBlobUrl("thumbnail", videoId);
+  // Lazy: thumbnails fetch only once the cell scrolls near the viewport.
+  // Eager-fetching the whole grid (up to 200 cells) saturated the browser's
+  // connection pool and starved every other API call on the page.
+  const { ref, inView } = useInView<HTMLButtonElement>();
+  const { url, failed } = useBlobUrl("thumbnail", inView ? videoId : null);
   return (
-    <button onClick={onPick} className="relative aspect-square w-full overflow-hidden bg-zinc-100 dark:bg-zinc-800">
+    <button ref={ref} onClick={onPick} className="relative aspect-square w-full overflow-hidden bg-zinc-100 dark:bg-zinc-800">
       {url ? (
         <img src={url} alt="" className="h-full w-full object-cover" />
       ) : (
