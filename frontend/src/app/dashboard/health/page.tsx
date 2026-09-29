@@ -3,6 +3,7 @@ import {
   Cog, Database, Film, Globe, HardDrive, HeartPulse, Instagram, Radio, RefreshCw, Timer,
 } from "lucide-react";
 import { Card, CardTitle, QueryFailed, Spinner } from "@/components/ui";
+import { IncidentTimeline } from "@/components/dashboard/incident-timeline";
 import { useSystemHealth } from "@/hooks/use-api";
 import { cn } from "@/lib/utils";
 
@@ -128,6 +129,8 @@ export default function HealthPage() {
         Auto-refreshes every 15 seconds · Last checked{" "}
         {dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : "—"}
       </p>
+
+      <IncidentTimeline />
     </div>
   );
 }

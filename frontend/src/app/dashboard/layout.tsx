@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Header, MobileNav, Sidebar, TopBar } from "@/components/layout";
 import { CommandPalette } from "@/components/command-palette";
+import { ShortcutHelp } from "@/components/shortcut-help";
+import { PageTransition } from "@/components/motion";
 import { Toaster } from "@/components/toast";
 import { Spinner } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -77,10 +79,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       <div className="flex min-w-0 flex-1 flex-col">
         <Header />
         <TopBar />
-        <main className="flex-1 space-y-6 p-4 pb-20 md:p-6 md:pb-6">{children}</main>
+        <main className="flex-1 space-y-6 p-4 pb-20 md:p-6 md:pb-6"><PageTransition>{children}</PageTransition></main>
       </div>
       <Toaster />
       <CommandPalette />
+      <ShortcutHelp />
       <MobileNav />
     </div>
   );

@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { useAuth, useUi } from "@/stores/stores";
 import { NotificationBell } from "@/components/notifications";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { DisplaySettings } from "@/components/display-settings";
 import { openCommandPalette } from "@/components/command-palette";
 import { NAV } from "@/components/nav";
 
@@ -57,6 +58,7 @@ export function Header() {
       <div className="ml-auto flex min-w-0 items-center gap-2">
         <NotificationBell />
         <ThemeToggle />
+        <DisplaySettings />
         <button onClick={logout} className="btn-ghost shrink-0 !px-2" aria-label="Log out">
           <LogOut className="h-4 w-4" />
         </button>
@@ -87,6 +89,7 @@ export function TopBar() {
         </button>
         <NotificationBell />
         <ThemeToggle />
+        <DisplaySettings />
         <span className="max-w-[200px] truncate rounded-full bg-zinc-100 px-3 py-1 text-xs font-semibold dark:bg-zinc-800" title={username ?? "admin"}>{username ?? "admin"}</span>
       </div>
     </header>

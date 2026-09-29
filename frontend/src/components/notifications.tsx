@@ -5,6 +5,7 @@ import {
   AlertOctagon, AlertTriangle, Bell, CalendarClock, CheckCheck, CheckCircle2, Info,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useNow } from "@/hooks/use-now";
 import {
   useMarkAllNotificationsRead, useMarkNotificationRead, useNotifications,
 } from "@/hooks/use-api";
@@ -79,6 +80,8 @@ function countdown(inSeconds: number): string {
 
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
+  // Re-render every 30s so the relative timestamps stay live.
+  useNow();
   const router = useRouter();
   const { data } = useNotifications();
   const markRead = useMarkNotificationRead();

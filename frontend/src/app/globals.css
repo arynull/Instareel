@@ -1,16 +1,30 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap");
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 /* ---------- Design tokens ---------- */
-:root {
+:root,
+:root[data-accent="emerald"] {
   --brand: #10b981;
+  --brand-hover: #059669;
   --ig-yellow: #f9ce34;
   --ig-pink: #ee2a7b;
   --ig-purple: #6228d7;
   --ig-gradient: linear-gradient(45deg, var(--ig-yellow), var(--ig-pink), var(--ig-purple));
+}
+:root[data-accent="violet"] {
+  --brand: #8b5cf6;
+  --brand-hover: #7c3aed;
+}
+:root[data-accent="sky"] {
+  --brand: #0ea5e9;
+  --brand-hover: #0284c7;
+}
+:root[data-accent="rose"] {
+  --brand: #f43f5e;
+  --brand-hover: #e11d48;
 }
 
 body {
@@ -53,7 +67,16 @@ body {
 }
 
 .btn-primary {
-  @apply inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 active:scale-[0.98] disabled:opacity-50;
+  @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition active:scale-[0.98] disabled:opacity-50;
+  background-color: var(--brand);
+}
+.btn-primary:hover {
+  background-color: var(--brand-hover);
+}
+
+/* Accent-colored text that follows the user's accent pick */
+.text-brand {
+  color: var(--brand);
 }
 
 .btn-ghost {
@@ -114,9 +137,37 @@ html.dark.black .btn-ghost:hover {
   border-radius: 9999px;
 }
 
+/* ---------- Density ---------- */
+/* Compact density: tighter cards and buttons, set via data-density="compact" on <html> */
+[data-density="compact"] .card {
+  padding: 0.75rem;
+}
+@media (min-width: 640px) {
+  [data-density="compact"] .card {
+    padding: 1rem;
+  }
+}
+[data-density="compact"] .btn-primary,
+[data-density="compact"] .btn-ghost {
+  padding-top: 0.375rem;
+  padding-bottom: 0.375rem;
+}
+
+/* ---------- Dashboard widget drag-and-drop ---------- */
+.widget-drop-target {
+  outline: 2px dashed var(--brand);
+  outline-offset: 4px;
+  border-radius: 12px;
+}
+
 /* ---------- Typography helpers ---------- */
 .tnum {
   font-variant-numeric: tabular-nums;
+}
+
+/* Display font for KPI numbers and other hero numerals */
+.font-display {
+  font-family: "Space Grotesk", "Inter", ui-sans-serif, system-ui, sans-serif;
 }
 
 /* ---------- Motion ---------- */
@@ -132,6 +183,15 @@ html.dark.black .btn-ghost:hover {
 }
 .animate-fade-up {
   animation: fade-up 0.35s ease both;
+}
+
+/* Staggered entrance for lists/grids — set --stagger-index (0,1,2,…) inline.
+ * Base opacity 0 so items don't flash before their delayed animation starts;
+ * the reduced-motion override below restores opacity 1. */
+.stagger-item {
+  opacity: 0;
+  animation: fade-up 0.4s ease both;
+  animation-delay: calc(var(--stagger-index, 0) * 45ms);
 }
 
 @keyframes pulse-dot {
@@ -169,6 +229,19 @@ html.dark.black .btn-ghost:hover {
   animation: shimmer 1.4s linear infinite;
 }
 
+/* ---------- Film grain ---------- */
+/* Subtle noise over dark surfaces for depth. pointer-events:none and a tiny
+ * opacity keep it purely decorative; it sits below overlays (z-50). */
+.dark body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0.028;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
 /* ---------- Accessibility ---------- */
 button:focus-visible,
 a:focus-visible {
@@ -182,6 +255,10 @@ a:focus-visible {
   .animate-fade-up,
   .live-dot,
   .skeleton {
+    animation: none;
+  }
+  .stagger-item {
+    opacity: 1;
     animation: none;
   }
 }

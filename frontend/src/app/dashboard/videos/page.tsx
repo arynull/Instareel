@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { Plus } from "lucide-react";
 import { Card, EmptyState, QueryFailed, Spinner, StatusBadge } from "@/components/ui";
+import { VideosArt } from "@/components/empty-art";
 import { useApiMutation, useVideos } from "@/hooks/use-api";
 import { timeAgo } from "@/lib/utils";
 import type { Video } from "@/types/models";
@@ -31,7 +32,7 @@ export default function VideosPage() {
         </div>
       </div>
       {isLoading ? <Spinner /> : isError ? <QueryFailed onRetry={() => refetch()} /> : videos.length === 0 ? (
-        <EmptyState title="No videos" hint="Upload your first video to start the funnel." />
+        <EmptyState title="No videos" hint="Upload your first video to start the funnel." icon={<VideosArt className="h-12 w-12 text-zinc-300 dark:text-zinc-600" />} />
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {videos.map((v) => (

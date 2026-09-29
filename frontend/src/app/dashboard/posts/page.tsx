@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { Card, EmptyState, QueryFailed, Spinner, StatusBadge } from "@/components/ui";
+import { WhyPopover } from "@/components/why-popover";
 import { useApiMutation, usePosts, useQueue } from "@/hooks/use-api";
 import { fmt, parseApiDate, timeAgo } from "@/lib/utils";
 import type { Post } from "@/types/models";
@@ -55,7 +56,20 @@ export default function PostsPage() {
                 {posts.map((p) => (
                   <tr key={p.id} className="border-t border-zinc-100 dark:border-zinc-800">
                     <td className="py-2 pr-4">#{p.id} · acc #{p.account_id} · vid #{p.video_id}</td>
-                    <td className="py-2 pr-4"><StatusBadge status={p.status} /></td>
+                    <td className="py-2 pr-4">
+                      <span className="inline-flex items-center gap-1">
+                        <StatusBadge status={p.status} />
+                        {p.status === "failed" && p.fail_reason && (
+                          <WhyPopover label={`Why did post #${p.id} fail?`}>
+                            <p className="mb-1 font-semibold">Why it failed</p>
+                            <p className="break-words text-zinc-600 dark:text-zinc-300">{p.fail_reason}</p>
+                            {p.retry_count > 0 && (
+                              <p className="mt-1.5 text-zinc-400">Retried {p.retry_count}× — fix the cause, then hit Retry.</p>
+                            )}
+                          </WhyPopover>
+                        )}
+                      </span>
+                    </td>
                     <td className="max-w-[160px] truncate py-2 pr-4 text-zinc-500" title={p.audio_track ?? ""}>{p.audio_track ?? "—"}{p.is_trial ? " · trial" : ""}</td>
                     <td className="py-2 pr-4 text-right">{fmt(p.views_7d ?? p.views_24h)}</td>
                     <td className="py-2 pr-4 text-right">{p.engagement_rate != null ? `${p.engagement_rate}%` : "—"}</td>

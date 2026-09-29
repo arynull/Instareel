@@ -15,12 +15,20 @@ export const metadata: Metadata = {
  */
 const blackThemeInit = `try{if(localStorage.getItem('theme')==='black')document.documentElement.classList.add('dark')}catch(e){}`;
 
+/**
+ * Restores the user's accent + density picks before first paint so the
+ * correct brand color and spacing apply from the very first frame.
+ * Keys must match lib/display-prefs.ts (igf:accent, igf:density).
+ */
+const displayPrefsInit = `try{var a=localStorage.getItem('igf:accent');if(a==='emerald'||a==='violet'||a==='sky'||a==='rose')document.documentElement.dataset.accent=a;var d=localStorage.getItem('igf:density');if(d==='compact'||d==='comfortable')document.documentElement.dataset.density=d;}catch(e){}`;
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
       <body className="min-h-screen bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100">
         <Providers>{children}</Providers>
         <script dangerouslySetInnerHTML={{ __html: blackThemeInit }} />
+        <script dangerouslySetInnerHTML={{ __html: displayPrefsInit }} />
       </body>
     </html>
   );

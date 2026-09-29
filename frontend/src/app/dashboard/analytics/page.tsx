@@ -2,6 +2,9 @@
 import { useState } from "react";
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Card, CardTitle, PageSkeleton, QueryFailed } from "@/components/ui";
+import { ChartTooltip } from "@/components/chart-theme";
+import { ACCENTS } from "@/lib/display-prefs";
+import { useDisplay } from "@/stores/display";
 import { toast } from "@/components/toast";
 import { useAccounts, useBestSlots, useOverview, useApiMutation } from "@/hooks/use-api";
 import { api } from "@/lib/api";
@@ -35,6 +38,7 @@ export default function AnalyticsPage() {
   const [slotAccount, setSlotAccount] = useState("");
   const { data: slots, isLoading: slotsLoading } = useBestSlots(slotAccount);
   const refresh = useApiMutation("post", [["overview"]], "Refresh queued — fresh numbers land in a few minutes");
+  const brand = ACCENTS[useDisplay((s) => s.accent)].brand;
 
   async function exportCsv() {
     if (exporting) return;
@@ -84,7 +88,7 @@ export default function AnalyticsPage() {
           >
             Last refresh: {data.last_analytics_refresh ? timeAgo(data.last_analytics_refresh) : "never"}
           </p>
-          <Sparkline data={data.series} dataKey="views" stroke="#10b981" /></Card>
+          <Sparkline data={data.series} dataKey="views" stroke={brand} /></Card>
         <Card><p className="tnum text-2xl font-extrabold">{data.avg_engagement_rate}%</p><p className="text-xs text-zinc-500">Avg engagement</p></Card>
       </div>
       <Card>
@@ -95,8 +99,8 @@ export default function AnalyticsPage() {
               <CartesianGrid strokeDasharray="3 3" opacity={0.3} />
               <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={30} />
               <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip />
-              <Line type="monotone" dataKey="views" stroke="#10b981" strokeWidth={2} dot={false} />
+              <Tooltip content={<ChartTooltip format={(v) => fmt(Number(v))} />} />
+              <Line type="monotone" dataKey="views" name="Views" stroke={brand} strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -109,8 +113,8 @@ export default function AnalyticsPage() {
               <CartesianGrid strokeDasharray="3 3" opacity={0.3} />
               <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={30} />
               <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-              <Tooltip />
-              <Bar dataKey="posts" fill="#10b981" radius={[4, 4, 0, 0]} />
+              <Tooltip content={<ChartTooltip format={(v) => fmt(Number(v))} />} />
+              <Bar dataKey="posts" name="Posts" fill={brand} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -134,10 +138,10 @@ export default function AnalyticsPage() {
                   <XAxis dataKey="name" tick={{ fontSize: 11 }} interval={0} angle={-12} dy={8} height={44} />
                   <YAxis yAxisId="posts" orientation="left" tick={{ fontSize: 11 }} allowDecimals={false} />
                   <YAxis yAxisId="views" orientation="right" tick={{ fontSize: 11 }} tickFormatter={(v: number) => fmt(v)} />
-                  <Tooltip formatter={(v: any, name: any) => [fmt(Number(v ?? 0)), name === "views" ? "Views" : "Posts"]} />
+                  <Tooltip content={<ChartTooltip format={(v: any, name: any) => fmt(Number(v ?? 0))} />} />
                   <Legend wrapperStyle={{ fontSize: 12 }} />
                   <Bar yAxisId="posts" dataKey="posts" name="Posts" fill="#38bdf8" radius={[4, 4, 0, 0]} maxBarSize={42} />
-                  <Bar yAxisId="views" dataKey="views" name="Views" fill="#10b981" radius={[4, 4, 0, 0]} maxBarSize={42} />
+                  <Bar yAxisId="views" dataKey="views" name="Views" fill={brand} radius={[4, 4, 0, 0]} maxBarSize={42} />
                 </BarChart>
               </ResponsiveContainer>
             </div>

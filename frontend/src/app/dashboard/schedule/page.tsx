@@ -1,6 +1,7 @@
 "use client";
 import { Fragment, useState } from "react";
 import { Card, CardTitle, EmptyState, Field, QueryFailed, Spinner } from "@/components/ui";
+import { ScheduleArt } from "@/components/empty-art";
 import { toast } from "@/components/toast";
 import { useAccounts, useApiMutation, useCaptions, useEffects, useRules, useTimezone, useVideos } from "@/hooks/use-api";
 import { api } from "@/lib/api";
@@ -175,7 +176,7 @@ export default function SchedulePage() {
         <p className="mt-2 text-xs text-zinc-500">Rule times are {tzNote} — change <code>SCHEDULE_TZ</code> on the server to use another zone.</p>
       </Card>
 
-      {isLoading ? <Spinner /> : isError ? <QueryFailed onRetry={() => refetch()} /> : list.length === 0 ? <EmptyState title="No schedule rules" /> : (
+      {isLoading ? <Spinner /> : isError ? <QueryFailed onRetry={() => refetch()} /> : list.length === 0 ? <EmptyState title="No schedule rules" hint="Create your first rule to automate posting times." icon={<ScheduleArt className="h-12 w-12 text-zinc-300 dark:text-zinc-600" />} /> : (
         <Card>
           {list.map((r) => {
             const st = ruleState(r);

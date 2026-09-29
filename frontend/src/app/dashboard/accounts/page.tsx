@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { Card, EmptyState, Field, PageSkeleton, QueryFailed, StatusBadge } from "@/components/ui";
+import { AccountsArt } from "@/components/empty-art";
 import { toast } from "@/components/toast";
 import { useAccounts, useApiMutation, useProxies } from "@/hooks/use-api";
 import { proxyHost, timeAgo } from "@/lib/utils";
@@ -129,6 +130,7 @@ export default function AccountsPage() {
         <EmptyState
           title="No accounts yet"
           hint="Add your first Instagram account with the form above, then connect a source and schedule your first reel."
+          icon={<AccountsArt className="h-12 w-12 text-zinc-300 dark:text-zinc-600" />}
         />
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
