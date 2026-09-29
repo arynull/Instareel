@@ -37,6 +37,31 @@ def _audio_out(t: AudioTrack) -> AudioOut:
 
 # ---- Bios (bio text + link + full name + picture + privacy) ----
 
+async def _await_blocking(fn, /, *args, timeout: float, **kwargs):
+    """Run a blocking callable in a worker thread and await it *without*
+    blocking the event loop.
+
+    Several endpoints used ``pool.submit(...).result(timeout)`` directly on
+    the loop thread; with a single uvicorn worker that froze the whole
+    dashboard for up to ``timeout`` seconds — the phone view hits
+    GET /bios/{id}/current on every mount, so one slow Instagram read hung
+    the entire site. ``asyncio.to_thread`` yields control while the thread
+    works, so other requests keep flowing; on timeout the worker is left
+    running detached and its late result is discarded.
+
+    Raises ``concurrent.futures.TimeoutError`` on timeout so the existing
+    ``except concurrent.futures.TimeoutError`` handlers keep working.
+    ``timeout`` is keyword-only so it never leaks into ``fn``'s kwargs.
+    """
+    import asyncio
+    import concurrent.futures
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(fn, *args, **kwargs), timeout)
+    except (asyncio.TimeoutError, concurrent.futures.TimeoutError) as exc:
+        raise concurrent.futures.TimeoutError(f"timed out after {timeout:g}s") from exc
+
+
 async def _resolve_route(acc_id: int) -> "tuple[bool, str | None]":
     """(reachable, proxy_url) for an account, callable from async endpoints.
 
@@ -182,12 +207,12 @@ async def apply_bio(
     egress = _urlsplit(purl).hostname if purl else "direct"
     svc = InstagramService(proxy_url=purl, session_path=session_path_for(username, settings.MEDIA_ROOT))
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            err = pool.submit(
-                svc.apply_profile, username, password,
-                biography=bio_text, external_url=link, full_name=full_name,
-                make_private=make_private, picture_path=picture,
-            ).result(timeout=180)
+        err = await _await_blocking(
+            svc.apply_profile, username, password,
+            biography=bio_text, external_url=link, full_name=full_name,
+            make_private=make_private, picture_path=picture,
+            timeout=180,
+        )
     except concurrent.futures.TimeoutError:
         await log_event("ERROR", "account", f"Profile apply timed out for account {acc_id} via {egress}")
         raise HTTPException(504, f"Profile apply timed out after 180s [via {egress}] — the proxy route stalled")
@@ -341,10 +366,10 @@ async def remove_live_picture(
     egress = _urlsplit(purl).hostname if purl else "direct"
     svc = InstagramService(proxy_url=purl, session_path=session_path_for(username, settings.MEDIA_ROOT))
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            err = pool.submit(
-                svc.remove_live_picture, username, password,
-            ).result(timeout=180)
+        err = await _await_blocking(
+            svc.remove_live_picture, username, password,
+            timeout=180,
+        )
     except concurrent.futures.TimeoutError:
         await log_event("ERROR", "account", f"Live picture removal timed out for account {acc_id} via {egress}")
         raise HTTPException(504, f"Live picture removal timed out after 180s [via {egress}] — the proxy route stalled")
@@ -365,8 +390,6 @@ async def bio_current(
     db: AsyncSession = Depends(get_db),
 ):
     """Read-only IG-side profile snapshot to compare against the config."""
-    import concurrent.futures
-
     from app.config import settings
     from app.services.instagram_service import InstagramService
     from app.utils.instagram_helpers import session_path_for
@@ -381,14 +404,14 @@ async def bio_current(
     reachable, purl = await _resolve_route(acc.id)
     if not reachable:
         raise HTTPException(409, "No healthy proxy route for this account right now")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        try:
-            data = pool.submit(
-                InstagramService(proxy_url=purl, session_path=session_path_for(username, settings.MEDIA_ROOT)).read_profile,
-                username,
-            ).result(timeout=120)
-        except Exception as exc:
-            raise HTTPException(502, f"Profile read failed: {exc}")
+    try:
+        data = await _await_blocking(
+            InstagramService(proxy_url=purl, session_path=session_path_for(username, settings.MEDIA_ROOT)).read_profile,
+            username,
+            timeout=120,
+        )
+    except Exception as exc:
+        raise HTTPException(502, f"Profile read failed: {exc}")
     return data
 
 
@@ -793,8 +816,6 @@ async def refresh_pool_now(request: Request, _: str = Depends(get_current_admin)
 @proxy_router.post("/pool/purge")
 @limiter.limit("5/minute")
 async def purge_pool_now(request: Request, _: str = Depends(get_current_admin)):
-    import concurrent.futures
-
     from app.database import SyncSessionLocal
     from app.tasks.sync_helpers import get_setting, publish_sync, purge_stale_auto_proxies
 
@@ -812,8 +833,7 @@ async def purge_pool_now(request: Request, _: str = Depends(get_current_admin)):
                 s, max_age_days=min(max(days, 1), 30), stillborn_hours=max(stillborn, 1))
 
     # The purge helper is sync (same session style as the celery tasks).
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        n = pool.submit(_run).result(timeout=120)
+    n = await _await_blocking(_run, timeout=120)
     await log_event("INFO", "proxy", f"Manual pool purge: {n} stale auto rows removed")
     publish_sync("proxy_pool_update", {"purged": n})
     return {"purged": n}
@@ -826,8 +846,6 @@ async def reset_proxies_now(request: Request, _: str = Depends(get_current_admin
     manual rows to a fresh NEW state, and unlink all accounts from proxies
     so nothing routes through an unverified proxy afterwards. Sources and
     pool settings are left untouched."""
-    import concurrent.futures
-
     from sqlalchemy import update
 
     from app.database import SyncSessionLocal
@@ -871,8 +889,7 @@ async def reset_proxies_now(request: Request, _: str = Depends(get_current_admin
                 "unlinked_accounts": unlinked,
             }
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        res = pool.submit(_run).result(timeout=120)
+    res = await _await_blocking(_run, timeout=120)
     await log_event(
         "INFO", "proxy",
         f"Manual proxy reset: {res['deleted_auto']} auto deleted, "
