@@ -203,3 +203,30 @@ export function useApiMutation(method: "post" | "put" | "delete", invalidate: st
     },
   });
 }
+
+export function useFunnel() {
+  return useQuery({
+    queryKey: ["funnel"],
+    queryFn: () => get<{ stages: { key: string; label: string; count: number }[] }>("/analytics/funnel"),
+    refetchInterval: 60000,
+  });
+}
+export interface HeatmapData {
+  account_id: number | null;
+  username: string | null;
+  personalized: boolean;
+  days: number;
+  tz_label: string;
+  dow_labels: string[];
+  max_avg_views: number;
+  total_posts: number;
+  cells: { dow: number; hour: number; posts: number; avg_views: number }[];
+}
+export function useHeatmap(accountId: number | "") {
+  const qs = accountId === "" ? "" : `?account_id=${accountId}`;
+  return useQuery({
+    queryKey: ["heatmap", accountId],
+    queryFn: () => get<HeatmapData>(`/analytics/engagement-heatmap${qs}`),
+    staleTime: 300000,
+  });
+}

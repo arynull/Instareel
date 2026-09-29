@@ -1,34 +1,13 @@
 "use client";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import {
-  BarChart3, CalendarClock, Captions, Clapperboard, Download, FileText, HeartPulse, Home, Instagram,
-  LogOut, Menu, Moon, Music, Server, Settings, SlidersHorizontal, Smartphone, Sun, Users, History,
-} from "lucide-react";
-import { useTheme } from "next-themes";
+import { usePathname } from "next/navigation";
+import { Clapperboard, LogOut, Menu, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth, useUi } from "@/stores/stores";
 import { NotificationBell } from "@/components/notifications";
-
-const NAV = [
-  { href: "/dashboard", label: "Dashboard", icon: Home },
-  { href: "/dashboard/phone", label: "Phone", icon: Smartphone },
-  { href: "/dashboard/videos", label: "Videos", icon: Clapperboard },
-  { href: "/dashboard/sources", label: "Sources", icon: Download },
-  { href: "/dashboard/accounts", label: "Accounts", icon: Instagram },
-  { href: "/dashboard/posts", label: "Posts", icon: History },
-  { href: "/dashboard/schedule", label: "Schedule", icon: CalendarClock },
-  { href: "/dashboard/captions", label: "Captions", icon: Captions },
-  { href: "/dashboard/bios", label: "Profile", icon: FileText },
-  { href: "/dashboard/proxies", label: "Proxies", icon: Users },
-  { href: "/dashboard/effects", label: "Effects", icon: SlidersHorizontal },
-  { href: "/dashboard/audio", label: "Audio", icon: Music },
-  { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
-  { href: "/dashboard/server", label: "Server", icon: Server },
-  { href: "/dashboard/health", label: "Health", icon: HeartPulse },
-  { href: "/dashboard/logs", label: "Logs", icon: FileText },
-  { href: "/dashboard/settings", label: "Settings", icon: Settings },
-];
+import { ThemeToggle } from "@/components/theme-toggle";
+import { openCommandPalette } from "@/components/command-palette";
+import { NAV } from "@/components/nav";
 
 export function Sidebar() {
   const pathname = usePathname();
@@ -36,7 +15,7 @@ export function Sidebar() {
   const { logout } = useAuth();
   if (!sidebarOpen) return null;
   return (
-    <aside className="hidden w-60 shrink-0 flex-col border-r border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950 md:flex">
+    <aside className="surface hidden w-60 shrink-0 flex-col border-r md:flex">
       <div className="flex h-16 items-center gap-2 border-b border-zinc-200 px-5 dark:border-zinc-800">
         <Clapperboard className="h-6 w-6 text-emerald-500" />
         <span className="text-lg font-extrabold tracking-tight">IG Funnel</span>
@@ -72,16 +51,12 @@ export function Sidebar() {
 
 export function Header() {
   const { username, logout } = useAuth();
-  const { theme, setTheme } = useTheme();
-  const router = useRouter();
   return (
-    <header className="flex h-16 items-center gap-3 border-b border-zinc-200 bg-white/80 px-4 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/80 md:hidden">
+    <header className="surface flex h-16 items-center gap-3 border-b px-4 backdrop-blur md:hidden">
       <span className="font-extrabold">IG Funnel</span>
       <div className="ml-auto flex min-w-0 items-center gap-2">
         <NotificationBell />
-        <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")} className="btn-ghost shrink-0 !px-2" aria-label="Toggle theme">
-          {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-        </button>
+        <ThemeToggle />
         <button onClick={logout} className="btn-ghost shrink-0 !px-2" aria-label="Log out">
           <LogOut className="h-4 w-4" />
         </button>
@@ -94,18 +69,24 @@ export function Header() {
 export function TopBar() {
   const { toggleSidebar, sidebarOpen } = useUi();
   const { username } = useAuth();
-  const { theme, setTheme } = useTheme();
   return (
-    <header className="sticky top-0 z-10 hidden h-16 items-center gap-3 border-b border-zinc-200 bg-white/80 px-6 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/80 md:flex">
+    <header className="surface sticky top-0 z-10 hidden h-16 items-center gap-3 border-b px-6 backdrop-blur md:flex">
       <button onClick={toggleSidebar} className="btn-ghost !px-2" aria-label="Toggle sidebar">
         <Menu className="h-5 w-5" />
       </button>
       <span className="text-xs text-zinc-400">{sidebarOpen ? "" : "IG Funnel"}</span>
       <div className="ml-auto flex items-center gap-3">
-        <NotificationBell />
-        <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")} className="btn-ghost !px-2" aria-label="Toggle theme">
-          {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+        <button
+          onClick={openCommandPalette}
+          className="btn-ghost hidden !px-3 !py-1.5 text-xs text-zinc-400 lg:inline-flex"
+          aria-label="Open command palette"
+        >
+          <Search className="h-3.5 w-3.5" />
+          <span>Search…</span>
+          <kbd className="rounded border border-zinc-300 px-1 text-[10px] dark:border-zinc-600">⌘K</kbd>
         </button>
+        <NotificationBell />
+        <ThemeToggle />
         <span className="max-w-[200px] truncate rounded-full bg-zinc-100 px-3 py-1 text-xs font-semibold dark:bg-zinc-800" title={username ?? "admin"}>{username ?? "admin"}</span>
       </div>
     </header>
@@ -116,7 +97,7 @@ export function TopBar() {
 export function MobileNav() {
   const pathname = usePathname();
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-20 flex gap-1 overflow-x-auto border-t border-zinc-200 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-950 md:hidden">
+    <nav className="surface fixed inset-x-0 bottom-0 z-20 flex gap-1 overflow-x-auto border-t p-2 md:hidden">
       {NAV.map(({ href, label, icon: Icon }) => (
         <Link
           key={href}

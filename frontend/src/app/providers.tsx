@@ -8,7 +8,12 @@ export function Providers({ children }: { children: React.ReactNode }) {
     defaultOptions: { queries: { retry: 1, staleTime: 5000 } },
   }));
   return (
-    <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
+    <ThemeProvider
+      attribute="class"
+      defaultTheme="dark"
+      enableSystem={false}
+      value={{ light: "light", dark: "dark", black: "dark black" }}
+    >
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     </ThemeProvider>
   );

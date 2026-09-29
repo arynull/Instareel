@@ -1,11 +1,31 @@
 "use client";
 import { useState } from "react";
-import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Card, CardTitle, QueryFailed, Spinner } from "@/components/ui";
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Card, CardTitle, PageSkeleton, QueryFailed } from "@/components/ui";
 import { toast } from "@/components/toast";
 import { useAccounts, useBestSlots, useOverview, useApiMutation } from "@/hooks/use-api";
 import { api } from "@/lib/api";
 import { fmt, parseApiDate, timeAgo } from "@/lib/utils";
+
+/** Tiny sparkline for KPI cards — no axes, just the shape of the trend. */
+function Sparkline({ data, dataKey, stroke }: { data: { date: string }[]; dataKey: string; stroke: string }) {
+  if (!data || data.length < 2) return null;
+  return (
+    <div className="mt-2 h-10">
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
+          <defs>
+            <linearGradient id={`spark-${dataKey}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={stroke} stopOpacity={0.35} />
+              <stop offset="100%" stopColor={stroke} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <Area type="monotone" dataKey={dataKey} stroke={stroke} strokeWidth={1.5} fill={`url(#spark-${dataKey})`} dot={false} isAnimationActive={false} />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
 
 export default function AnalyticsPage() {
   const [days, setDays] = useState(30);
@@ -37,7 +57,7 @@ export default function AnalyticsPage() {
     }
   }
 
-  if (isLoading) return <Spinner />;
+  if (isLoading) return <PageSkeleton />;
   if (isError || !data) return <QueryFailed onRetry={() => refetch()} />;
 
   return (
@@ -55,15 +75,17 @@ export default function AnalyticsPage() {
         >{refresh.isPending ? "Queuing…" : "Refresh now"}</button>
       </div>
       <div className="grid gap-4 sm:grid-cols-3">
-        <Card><p className="text-2xl font-extrabold">{fmt(data.total_posts)}</p><p className="text-xs text-zinc-500">Posts</p></Card>
-        <Card><p className="text-2xl font-extrabold">{fmt(data.total_views)}</p><p className="text-xs text-zinc-500">Views</p>
+        <Card><p className="tnum text-2xl font-extrabold">{fmt(data.total_posts)}</p><p className="text-xs text-zinc-500">Posts</p>
+          <Sparkline data={data.series} dataKey="posts" stroke="#38bdf8" /></Card>
+        <Card><p className="tnum text-2xl font-extrabold">{fmt(data.total_views)}</p><p className="text-xs text-zinc-500">Views</p>
           <p
             className="mt-1 text-xs text-zinc-400"
             title={data.last_analytics_refresh ? parseApiDate(data.last_analytics_refresh).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : undefined}
           >
             Last refresh: {data.last_analytics_refresh ? timeAgo(data.last_analytics_refresh) : "never"}
-          </p></Card>
-        <Card><p className="text-2xl font-extrabold">{data.avg_engagement_rate}%</p><p className="text-xs text-zinc-500">Avg engagement</p></Card>
+          </p>
+          <Sparkline data={data.series} dataKey="views" stroke="#10b981" /></Card>
+        <Card><p className="tnum text-2xl font-extrabold">{data.avg_engagement_rate}%</p><p className="text-xs text-zinc-500">Avg engagement</p></Card>
       </div>
       <Card>
         <CardTitle>Views trend</CardTitle>
@@ -97,12 +119,29 @@ export default function AnalyticsPage() {
         <CardTitle>Account comparison</CardTitle>
         {(accounts ?? []).length === 0
           ? <p className="text-sm text-zinc-500">No accounts yet.</p>
-          : (accounts as { username: string; posts_today?: number; total_posts: number; total_views: number }[]).map((a: any) => (
-            <div key={a.username ?? a.id} className="flex min-w-0 items-center gap-2 border-t border-zinc-100 py-2 text-sm first:border-0 dark:border-zinc-800">
-              <strong title={a.username} className="min-w-0 flex-1 truncate">@{a.username}</strong>
-              <span className="shrink-0 whitespace-nowrap text-zinc-500">{a.total_posts ?? 0} posts · {fmt(a.total_views)} views</span>
+          : (
+            <div className="h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart
+                  data={((accounts ?? []) as { id: number; username: string; total_posts: number; total_views: number }[]).map((a) => ({
+                    name: `@${a.username}`,
+                    posts: a.total_posts ?? 0,
+                    views: a.total_views ?? 0,
+                  }))}
+                  margin={{ top: 4, right: 0, bottom: 0, left: 0 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.3} />
+                  <XAxis dataKey="name" tick={{ fontSize: 11 }} interval={0} angle={-12} dy={8} height={44} />
+                  <YAxis yAxisId="posts" orientation="left" tick={{ fontSize: 11 }} allowDecimals={false} />
+                  <YAxis yAxisId="views" orientation="right" tick={{ fontSize: 11 }} tickFormatter={(v: number) => fmt(v)} />
+                  <Tooltip formatter={(v: any, name: any) => [fmt(Number(v ?? 0)), name === "views" ? "Views" : "Posts"]} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <Bar yAxisId="posts" dataKey="posts" name="Posts" fill="#38bdf8" radius={[4, 4, 0, 0]} maxBarSize={42} />
+                  <Bar yAxisId="views" dataKey="views" name="Views" fill="#10b981" radius={[4, 4, 0, 0]} maxBarSize={42} />
+                </BarChart>
+              </ResponsiveContainer>
             </div>
-          ))}
+          )}
       </Card>
       <Card>
         <div className="flex flex-wrap items-center gap-2">

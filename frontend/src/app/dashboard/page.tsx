@@ -2,7 +2,10 @@
 import Link from "next/link";
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Clapperboard, Eye, Heart, Radio, Users } from "lucide-react";
-import { Card, CardTitle, EmptyState, QueryFailed, Spinner, StatusBadge } from "@/components/ui";
+import { Card, CardTitle, EmptyState, PageSkeleton, QueryFailed, StatusBadge } from "@/components/ui";
+import { FunnelWidget } from "@/components/dashboard/funnel";
+import { HeatmapWidget } from "@/components/dashboard/heatmap";
+import { StatusStrip } from "@/components/dashboard/status-strip";
 import { useAccounts, useOverview, usePosts, useQueue } from "@/hooks/use-api";
 import { fmt, timeAgo } from "@/lib/utils";
 import type { Account, Overview, Post } from "@/types/models";
@@ -13,7 +16,7 @@ function Kpi({ icon: Icon, label, value, sub }: { icon: typeof Eye; label: strin
       <div className="flex min-w-0 items-center gap-3">
         <div className="shrink-0 rounded-lg bg-emerald-600/10 p-2.5"><Icon className="h-5 w-5 text-emerald-500" /></div>
         <div className="min-w-0 flex-1">
-          <p title={value} className="truncate text-2xl font-extrabold tracking-tight">{value}</p>
+          <p title={value} className="tnum truncate text-2xl font-extrabold tracking-tight">{value}</p>
           <p className="truncate text-xs font-medium text-zinc-500" title={sub ? `${label} · ${sub}` : label}>{label}{sub ? ` · ${sub}` : ""}</p>
         </div>
       </div>
@@ -27,18 +30,24 @@ export default function DashboardPage() {
   const { data: posts } = usePosts();
   const { data: queue } = useQueue();
 
-  if (isLoading) return <Spinner />;
+  if (isLoading) return <PageSkeleton />;
   if (isError || !overview) return <QueryFailed onRetry={() => refetch()} />;
   const ov = overview as Overview;
   const recent = ((posts ?? []) as Post[]).slice(0, 10);
 
   return (
     <div className="space-y-6">
+      <StatusStrip />
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Kpi icon={Clapperboard} label="Total posts" value={fmt(ov.total_posts)} />
         <Kpi icon={Eye} label="Total views" value={fmt(ov.total_views)} />
         <Kpi icon={Heart} label="Avg engagement" value={`${ov.avg_engagement_rate}%`} />
         <Kpi icon={Users} label="Active accounts" value={String(ov.active_accounts)} sub={`${ov.queue_size} in queue`} />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-5">
+        <div className="xl:col-span-2"><FunnelWidget /></div>
+        <div className="xl:col-span-3"><HeatmapWidget /></div>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">

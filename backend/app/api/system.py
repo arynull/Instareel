@@ -360,6 +360,33 @@ async def best_slots(
     return await slots.best_slots_for_account(db, account_id, limit=limit)
 
 
+@analytics_router.get("/engagement-heatmap")
+async def engagement_heatmap(
+    account_id: int | None = Query(default=None),
+    days: int = Query(default=90, ge=7, le=365),
+    _: str = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """7x24 engagement heatmap (dow x local hour) for the dashboard.
+    Per-account when it has enough posted history, global fallback
+    otherwise. Read-only."""
+    from app.services import engagement_heatmap as heat
+
+    return await heat.heatmap_for_account(db, account_id, days=days)
+
+
+@analytics_router.get("/funnel")
+async def pipeline_funnel(
+    _: str = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pipeline stage counts (sources -> library -> ready -> scheduled ->
+    posted) for the dashboard command center. Read-only."""
+    from app.services import engagement_heatmap as heat
+
+    return await heat.funnel_counts(db)
+
+
 @analytics_router.get("/export")
 async def export_csv(_: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(Post, Video).join(Video, Video.id == Post.video_id).where(Post.status == PostStatus.posted).order_by(desc(Post.posted_at)).limit(2000))).all()

@@ -3,7 +3,7 @@ import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { api } from "@/lib/api";
-import { Card, EmptyState, Field, QueryFailed, Spinner, StatusBadge } from "@/components/ui";
+import { Card, EmptyState, Field, PageSkeleton, QueryFailed, StatusBadge } from "@/components/ui";
 import { toast } from "@/components/toast";
 import { useAccounts, useApiMutation, useProxies } from "@/hooks/use-api";
 import { proxyHost, timeAgo } from "@/lib/utils";
@@ -125,8 +125,11 @@ export default function AccountsPage() {
           </div>
         </div>
       </Card>
-      {isLoading ? <Spinner /> : isError ? <QueryFailed onRetry={() => refetch()} /> : accounts.length === 0 ? (
-        <EmptyState title="No accounts" hint="Add your first Instagram account above." />
+      {isLoading ? <PageSkeleton /> : isError ? <QueryFailed onRetry={() => refetch()} /> : accounts.length === 0 ? (
+        <EmptyState
+          title="No accounts yet"
+          hint="Add your first Instagram account with the form above, then connect a source and schedule your first reel."
+        />
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {accounts.map((a) => {
@@ -144,7 +147,12 @@ export default function AccountsPage() {
             );
             return (
             <Card key={a.id}>
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2.5">
+                <span className="ig-ring shrink-0" aria-hidden>
+                  <span className="flex h-9 w-9 items-center justify-center bg-zinc-100 text-sm font-extrabold uppercase text-zinc-500 dark:bg-zinc-800 dark:text-zinc-300">
+                    {a.username.charAt(0)}
+                  </span>
+                </span>
                 <Link href={`/dashboard/accounts/${a.id}`} title={a.username} className="min-w-0 flex-1 truncate break-all font-semibold hover:text-emerald-500">@{a.username}</Link>
                 <span className="ml-auto shrink-0"><StatusBadge status={a.status} /></span>
               </div>

@@ -4,12 +4,48 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ---------- Design tokens ---------- */
+:root {
+  --brand: #10b981;
+  --ig-yellow: #f9ce34;
+  --ig-pink: #ee2a7b;
+  --ig-purple: #6228d7;
+  --ig-gradient: linear-gradient(45deg, var(--ig-yellow), var(--ig-pink), var(--ig-purple));
+}
+
 body {
   font-feature-settings: "cv11", "ss01";
 }
 
+::selection {
+  background: rgb(16 185 129 / 0.25);
+}
+
+/* ---------- Scrollbars (thin, theme-aware) ---------- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(161 161 170 / 0.5) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgb(161 161 170 / 0.45);
+  border-radius: 9999px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- Surfaces ---------- */
 .card {
   @apply rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900;
+}
+
+/* Top-level app surfaces (sidebar, top bars, mobile nav) */
+.surface {
+  @apply border-zinc-200 bg-white/80 dark:border-zinc-800 dark:bg-zinc-950/80;
 }
 
 .input {
@@ -17,13 +53,133 @@ body {
 }
 
 .btn-primary {
-  @apply inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50;
+  @apply inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 active:scale-[0.98] disabled:opacity-50;
 }
 
 .btn-ghost {
-  @apply inline-flex items-center justify-center gap-2 rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium transition hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800;
+  @apply inline-flex items-center justify-center gap-2 rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium transition hover:bg-zinc-100 active:scale-[0.98] dark:border-zinc-700 dark:hover:bg-zinc-800;
 }
 
 .label {
   @apply mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500;
+}
+
+/* ---------- True-black (OLED) theme ----------
+   next-themes maps theme "black" to classes "dark black", so every
+   dark: variant keeps working and these overrides deepen the surfaces. */
+html.dark.black {
+  color-scheme: dark;
+}
+html.dark.black body {
+  background-color: #000;
+}
+html.dark.black .card {
+  background-color: #0a0a0a;
+  border-color: #1c1c1e;
+}
+html.dark.black .surface {
+  background-color: rgb(0 0 0 / 0.85);
+  border-color: #1c1c1e;
+}
+html.dark.black .input {
+  background-color: #0a0a0a;
+  border-color: #2a2a2c;
+}
+html.dark.black .btn-ghost {
+  border-color: #2a2a2c;
+}
+html.dark.black .btn-ghost:hover {
+  background-color: #141414;
+}
+
+/* ---------- Instagram brand accents (use sparingly) ---------- */
+.ig-gradient-bg {
+  background: var(--ig-gradient);
+}
+.ig-text {
+  background: var(--ig-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+/* Conic ring for account avatars / active states */
+.ig-ring {
+  background: conic-gradient(from 180deg, var(--ig-yellow), var(--ig-pink), var(--ig-purple), var(--ig-yellow));
+  border-radius: 9999px;
+  padding: 2px;
+}
+.ig-ring > * {
+  border-radius: 9999px;
+}
+
+/* ---------- Typography helpers ---------- */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Motion ---------- */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fade-up {
+  animation: fade-up 0.35s ease both;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.85);
+  }
+}
+.live-dot {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+/* Skeleton shimmer for loading placeholders */
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgb(161 161 170 / 0.12) 25%,
+    rgb(161 161 170 / 0.28) 50%,
+    rgb(161 161 170 / 0.12) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+
+/* ---------- Accessibility ---------- */
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Respect reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-up,
+  .live-dot,
+  .skeleton {
+    animation: none;
+  }
 }
