@@ -183,14 +183,19 @@ class InstagramService:
         """
         cl = self._make_client(username)
         try:
-            ok, _ = _feed_with_retry(cl)
+            ok, kind = _feed_with_retry(cl)
             if not ok:
-                cl.login(username, password)
-                if self.session_path:
-                    try:
-                        dump_session_settings(cl, self.session_path)
-                    except Exception:
-                        pass
+                # Never fresh-login here: a password login is the strongest
+                # automation signal Instagram sees, and this runs unattended
+                # inside execute_post's retry loop — one dead session would
+                # otherwise become a login storm (up to 4 fresh logins in
+                # ~7 minutes). Fail closed instead; the caller parks the post
+                # and tells the admin to refresh the session explicitly via
+                # the Accounts page (a single, human-initiated login).
+                return None, None, (
+                    f"login_required: session invalid ({kind}) — refresh the "
+                    "session on the Accounts page, then retry the post"
+                )
             # instagrapi generates the cover via MoviePy when thumbnail is
             # omitted — not installed here, so always pass an explicit file.
             from pathlib import Path as _Path
@@ -248,14 +253,15 @@ class InstagramService:
             return f"picture: file not found ({picture_path})"
         cl = self._make_client(username)
         try:
-            ok, _ = _feed_with_retry(cl)
+            ok, kind = _feed_with_retry(cl)
             if not ok:
-                cl.login(username, password)
-                if self.session_path:
-                    try:
-                        dump_session_settings(cl, self.session_path)
-                    except Exception:
-                        pass
+                # Same rule as upload_reel: never auto-login. A password
+                # login is the strongest automation signal; the admin
+                # refreshes the session explicitly via the Accounts page.
+                return (
+                    f"login_required: session invalid ({kind}) — refresh the "
+                    "session on the Accounts page first"
+                )
             edit: dict = {}
             if (biography or "").strip():
                 edit["biography"] = biography
@@ -307,14 +313,14 @@ class InstagramService:
         """
         cl = self._make_client(username)
         try:
-            ok, _ = _feed_with_retry(cl)
+            ok, kind = _feed_with_retry(cl)
             if not ok:
-                cl.login(username, password)
-                if self.session_path:
-                    try:
-                        dump_session_settings(cl, self.session_path)
-                    except Exception:
-                        pass
+                # Same rule as upload_reel: never auto-login — the admin
+                # refreshes the session explicitly via the Accounts page.
+                return (
+                    f"login_required: session invalid ({kind}) — refresh the "
+                    "session on the Accounts page first"
+                )
             # POST with signed action data (same shape as set_private/_public):
             # a bare private_request() sends GET, which IG answers with 405.
             if not cl.user_id:

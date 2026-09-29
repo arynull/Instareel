@@ -963,7 +963,10 @@ class TestApplyProfile:
         err = svc.apply_profile("u", "p", biography="x")
         assert err.startswith("challenge")
 
-    def test_dead_session_falls_back_to_login(self, monkeypatch):
+    def test_dead_session_fails_without_login(self, monkeypatch):
+        # A dead session must NEVER trigger an automatic password login —
+        # that is the strongest automation signal. Fail closed; the admin
+        # refreshes the session explicitly via the Accounts page.
         import instagrapi
 
         class Dead(_FakeIGClient):
@@ -977,9 +980,29 @@ class TestApplyProfile:
         from app.services.instagram_service import InstagramService
 
         svc = InstagramService()
-        assert svc.apply_profile("u", "p", biography="x") == ""
+        err = svc.apply_profile("u", "p", biography="x")
+        assert err.startswith("login_required")
         kinds = [c[0] for c in Dead.made[-1].calls]
-        assert "login" in kinds and "edit" in kinds
+        assert "login" not in kinds and "edit" not in kinds
+
+    def test_remove_live_picture_dead_session_fails_without_login(self, monkeypatch):
+        import instagrapi
+
+        class Dead(_FakeIGClient):
+            def get_timeline_feed(self):
+                self.calls.append(("feed",))
+                raise Exception("login_required: expired")
+
+        monkeypatch.setattr(instagrapi, "Client", Dead)
+        monkeypatch.setattr("time.sleep", lambda s: None)
+
+        from app.services.instagram_service import InstagramService
+
+        svc = InstagramService()
+        err = svc.remove_live_picture("u", "p")
+        assert err.startswith("login_required")
+        kinds = [c[0] for c in Dead.made[-1].calls]
+        assert "login" not in kinds
 
 
 class TestAnonIngest:
@@ -1917,6 +1940,29 @@ class TestTrialUpload:
         mid, _, err = svc.upload_reel("u", "p", "v.mp4", "cap", trial=True)
         assert mid is None and err.startswith("throttled")
         assert len([c for c in Boom.made[-1].calls if c[0] == "clip"]) == 1
+
+    def test_dead_session_never_triggers_login(self, monkeypatch):
+        # The critical unattended path: execute_post retries, so an
+        # automatic fresh login on a dead session would become a login
+        # storm (up to 4 password logins in ~7 min) — the strongest
+        # automation signal Instagram sees. Fail closed instead.
+        import instagrapi
+
+        class Dead(_FakeIGClient):
+            def get_timeline_feed(self):
+                self.calls.append(("feed",))
+                raise Exception("login_required: expired")
+
+        monkeypatch.setattr(instagrapi, "Client", Dead)
+        monkeypatch.setattr("time.sleep", lambda s: None)
+
+        from app.services.instagram_service import InstagramService
+
+        svc = InstagramService()
+        mid, url, err = svc.upload_reel("u", "p", "v.mp4", "cap")
+        assert mid is None and url is None and err.startswith("login_required")
+        kinds = [c[0] for c in Dead.made[-1].calls]
+        assert "login" not in kinds and "clip" not in kinds
 
 
 class TestScheduleAutofill:
