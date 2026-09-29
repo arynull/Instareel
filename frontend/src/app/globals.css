@@ -65,8 +65,10 @@ body {
 }
 
 /* ---------- True-black (OLED) theme ----------
-   next-themes maps theme "black" to classes "dark black", so every
-   dark: variant keeps working and these overrides deepen the surfaces. */
+   Theme "black" puts class "black" on <html>; DarkClassSync (providers.tsx)
+   keeps "dark" alongside it because next-themes 0.3 throws on the
+   whitespace in "dark black". Every dark: variant therefore keeps working
+   and these overrides deepen the surfaces. */
 html.dark.black {
   color-scheme: dark;
 }
