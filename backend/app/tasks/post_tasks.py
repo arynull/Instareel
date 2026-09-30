@@ -9,6 +9,7 @@ import random
 import time
 
 from app.tasks.celery_app import celery
+from app.tasks.sync_helpers import publish_sync
 
 log = logging.getLogger("igfunnel.tasks.post")
 
@@ -162,6 +163,7 @@ def check_and_post(self):
                     rule.is_active = False
                     s.commit()
                     log_event_sync("INFO", "schedule", f"Rule '{rule.name}' retired: {why}")
+                    publish_sync("schedule_update", {"rule_id": rule.id, "is_active": False})
                     continue
                 if disposition != "fire" or video is None:
                     if rule.pinned_video_id and disposition != "fire":
@@ -224,6 +226,7 @@ def check_and_post(self):
                     rule.is_active = False
                     s.commit()
                     log_event_sync("INFO", "schedule", f"Rule '{rule.name}' fired its pinned video and retired")
+                    publish_sync("schedule_update", {"rule_id": rule.id, "is_active": False})
                 used_video_ids.add(video.id)
                 created += 1
                 late_minutes = (dt.datetime.now(dt.timezone.utc) - slot_utc).total_seconds() / 60

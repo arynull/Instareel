@@ -11,7 +11,52 @@ const EVENTS = [
   "account_status_change",
   "new_log",
   "proxy_pool_update",
+  "notification",
+  "analytics_update",
+  "schedule_update",
 ];
+
+/** Every react-query key the WS feed keeps fresh. On reconnect these are all
+ * invalidated — events published while the socket was down were missed, and
+ * the 5-minute safety poll alone would leave the dashboard stale. Prefix
+ * invalidation covers parameterized keys (["posts", status, ...]). */
+export const REALTIME_QUERY_KEYS = [
+  "videos",
+  "video-sources",
+  "overview",
+  "funnel",
+  "posts",
+  "queue",
+  "accounts",
+  "logs",
+  "proxies",
+  "proxy-pipeline",
+  "proxy-sources",
+  "notifications",
+  "rules",
+];
+
+/** Pure mapping: WS event -> react-query key prefixes to invalidate.
+ * Kept as a pure function (no React) so it is unit-testable without jsdom. */
+export function queryKeysForEvent(event: string): string[] {
+  if (event.startsWith("video")) return ["videos", "video-sources", "overview"];
+  if (event.startsWith("post")) return ["posts", "queue", "overview"];
+  if (event.startsWith("account")) return ["accounts"];
+  switch (event) {
+    case "new_log":
+      return ["logs"];
+    case "proxy_pool_update":
+      return ["proxies", "proxy-pipeline", "proxy-sources"];
+    case "notification":
+      return ["notifications"];
+    case "analytics_update":
+      return ["overview", "funnel"];
+    case "schedule_update":
+      return ["rules"];
+    default:
+      return [];
+  }
+}
 
 /** Resolve the WebSocket URL: same-origin in the browser when no API host
  * is configured (avoids cross-origin WS issues entirely). */
@@ -25,10 +70,16 @@ function wsBase(): string {
   return "";
 }
 
-/** Opens an authenticated WS feed; invalidates related queries on events (polling fallback lives in hooks). */
+/** Opens an authenticated WS feed; invalidates related queries on events.
+ * The socket is the primary freshness channel — hooks keep only a 5-minute
+ * safety poll as a backstop for missed frames. */
 export function useRealtimeFeed(enabled: boolean) {
   const qc = useQueryClient();
   const tries = useRef(0);
+  // True once the first "connected" frame arrived. A *re*connect means the
+  // socket was down and events were missed, so every realtime key is
+  // refetched. The initial connect skips this — mount queries just ran.
+  const seenConnected = useRef(false);
 
   useEffect(() => {
     if (!enabled || typeof window === "undefined") return;
@@ -96,22 +147,15 @@ export function useRealtimeFeed(enabled: boolean) {
           }
           if (!EVENTS.includes(msg.event) && msg.event !== "connected") return;
           tries.current = 0;
-          if (msg.event.startsWith("video")) {
-            qc.invalidateQueries({ queryKey: ["videos"] });
-            qc.invalidateQueries({ queryKey: ["video-sources"] });
-            qc.invalidateQueries({ queryKey: ["overview"] });
-          } else if (msg.event.startsWith("post")) {
-            qc.invalidateQueries({ queryKey: ["posts"] });
-            qc.invalidateQueries({ queryKey: ["queue"] });
-            qc.invalidateQueries({ queryKey: ["overview"] });
-          } else if (msg.event.startsWith("account")) {
-            qc.invalidateQueries({ queryKey: ["accounts"] });
-          } else if (msg.event === "new_log") {
-            qc.invalidateQueries({ queryKey: ["logs"] });
-          } else if (msg.event === "proxy_pool_update") {
-            qc.invalidateQueries({ queryKey: ["proxies"] });
-            qc.invalidateQueries({ queryKey: ["proxy-pipeline"] });
-            qc.invalidateQueries({ queryKey: ["proxy-sources"] });
+          if (msg.event === "connected") {
+            if (seenConnected.current) {
+              for (const key of REALTIME_QUERY_KEYS) qc.invalidateQueries({ queryKey: [key] });
+            }
+            seenConnected.current = true;
+            return;
+          }
+          for (const key of queryKeysForEvent(msg.event)) {
+            qc.invalidateQueries({ queryKey: [key] });
           }
         } catch {
           /* ignore malformed frames */

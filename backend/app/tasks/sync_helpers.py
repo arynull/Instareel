@@ -64,6 +64,9 @@ def log_event_sync(level: str, category: str, message: str, details: dict | None
         with SyncSessionLocal() as session:
             session.add(SystemLog(level=lvl, category=category, message=message, details=details))
             session.commit()
+        # Push so the dashboard log view updates instantly instead of waiting
+        # for its safety poll. Best-effort: publish_sync never raises.
+        publish_sync("new_log", {"level": lvl.name, "category": category})
     except Exception:
         log.exception("Failed to persist system log")
 
@@ -204,6 +207,9 @@ def notify_sync(
             if isinstance(n, int):
                 return n  # dedup hit: existing unread notification id
             session.flush()  # populate n.id; caller owns the commit
+            # Best-effort push; the row lands when the caller commits, a few
+            # ms before any client refetch round-trips.
+            publish_sync("notification", {"id": n.id, "ntype": ntype, "severity": sev.value})
             return n.id
         with SyncSessionLocal() as session:
             n = _create(session)
@@ -211,6 +217,8 @@ def notify_sync(
                 return n
             session.commit()
             session.refresh(n)
+            # Push AFTER commit so a client refetch always sees the row.
+            publish_sync("notification", {"id": n.id, "ntype": ntype, "severity": sev.value})
             return n.id
     except Exception:
         log.exception("Failed to persist notification %s", ntype)

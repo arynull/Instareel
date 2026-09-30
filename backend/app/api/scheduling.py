@@ -20,6 +20,22 @@ caption_router = APIRouter()
 hashtag_router = APIRouter()
 
 
+async def _emit_schedule_update(rule_id: int | None = None, is_active: bool | None = None) -> None:
+    """Push a schedule_update event so dashboard rule lists refresh instantly.
+
+    Best-effort: the async publish() in app.services.realtime swallows all
+    errors, so a down Redis never breaks the API response.
+    """
+    from app.services.realtime import publish as _publish
+
+    payload: dict = {}
+    if rule_id is not None:
+        payload["rule_id"] = rule_id
+    if is_active is not None:
+        payload["is_active"] = is_active
+    await _publish("schedule_update", payload)
+
+
 def _rule_out(r: ScheduleRule, pin_map: "dict[int, Video] | None" = None) -> ScheduleRuleOut:
     label = status = None
     if r.pinned_video_id and pin_map is not None:
@@ -99,6 +115,7 @@ async def create_rule(body: ScheduleRuleIn, _: str = Depends(get_current_admin),
     db.add(r)
     await db.commit()
     await db.refresh(r)
+    await _emit_schedule_update(rule_id=r.id, is_active=r.is_active)
     return _rule_out(r, await _pin_map(db, [r]))
 
 
@@ -119,6 +136,7 @@ async def update_rule(rule_id: int, body: ScheduleRuleUpdate, _: str = Depends(g
         setattr(r, k, v)
     await db.commit()
     await db.refresh(r)
+    await _emit_schedule_update(rule_id=r.id, is_active=r.is_active)
     return _rule_out(r, await _pin_map(db, [r]))
 
 
@@ -129,6 +147,7 @@ async def delete_rule(rule_id: int, _: str = Depends(get_current_admin), db: Asy
         raise HTTPException(404, "Rule not found")
     await db.delete(r)
     await db.commit()
+    await _emit_schedule_update(rule_id=rule_id)
     return None
 
 
@@ -139,6 +158,7 @@ async def toggle_rule(rule_id: int, _: str = Depends(get_current_admin), db: Asy
         raise HTTPException(404, "Rule not found")
     r.is_active = not r.is_active
     await db.commit()
+    await _emit_schedule_update(rule_id=r.id, is_active=r.is_active)
     return {"is_active": r.is_active}
 
 
@@ -157,6 +177,7 @@ async def pin_rule(rule_id: int, body: dict, _: str = Depends(get_current_admin)
     r.is_active = True
     await db.commit()
     await db.refresh(r)
+    await _emit_schedule_update(rule_id=r.id, is_active=True)
     return _rule_out(r, await _pin_map(db, [r]))
 
 
@@ -169,6 +190,7 @@ async def unpin_rule(rule_id: int, _: str = Depends(get_current_admin), db: Asyn
     r.pinned_video_id = None
     await db.commit()
     await db.refresh(r)
+    await _emit_schedule_update(rule_id=r.id, is_active=r.is_active)
     return _rule_out(r)
 
 

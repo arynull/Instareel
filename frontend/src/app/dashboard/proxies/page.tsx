@@ -36,7 +36,7 @@ function PipelineStatus() {
     queryFn: async () => (await api.get("/proxies/pipeline")).data as Pipeline,
     // Realtime first (WS proxy_pool_update invalidates this key); the poll
     // below is only a backstop for dropped frames.
-    refetchInterval: 60000,
+    refetchInterval: 300000,
   });
   if (!data) return null;
   const c = data.counts;

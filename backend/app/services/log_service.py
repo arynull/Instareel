@@ -18,5 +18,10 @@ async def log_event(level: str, category: str, message: str, details: dict[str, 
         async with SessionLocal() as session:
             session.add(SystemLog(level=lvl, category=category, message=message, details=details))
             await session.commit()
+        # Push AFTER commit so a client refetch always sees the row.
+        # Best-effort: publish() swallows all errors, never breaks the API.
+        from app.services.realtime import publish
+
+        await publish("new_log", {"level": lvl.name, "category": category})
     except Exception:
         log.exception("Failed to persist system log")

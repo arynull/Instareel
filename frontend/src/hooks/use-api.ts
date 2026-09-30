@@ -53,13 +53,18 @@ function errorMessage(err: unknown): string {
   return typeof detail === "string" ? detail : "Request failed";
 }
 
-// Polling is the fallback — the WS feed invalidates these keys on every
-// event, so intervals stay generous to avoid double-fetch traffic.
+// Realtime architecture: the WS feed (useRealtimeFeed) is the primary
+// freshness channel — every key below is invalidated on its event, and a
+// reconnect refetches everything (events published mid-drop are missed).
+// The interval here is only a safety backstop for frames that never arrive
+// (e.g. a Redis blip that swallowed a publish), so it stays generous.
+export const REALTIME_SAFETY_INTERVAL = 5 * 60 * 1000;
+
 export function useOverview(days = 30) {
-  return useQuery({ queryKey: ["overview", days], queryFn: () => get(`/analytics/overview?days=${days}`), refetchInterval: 60000 });
+  return useQuery({ queryKey: ["overview", days], queryFn: () => get(`/analytics/overview?days=${days}`), refetchInterval: REALTIME_SAFETY_INTERVAL });
 }
 export function useAccounts() {
-  return useQuery({ queryKey: ["accounts"], queryFn: () => get("/accounts"), refetchInterval: 60000 });
+  return useQuery({ queryKey: ["accounts"], queryFn: () => get("/accounts"), refetchInterval: REALTIME_SAFETY_INTERVAL });
 }
 
 /** Videos list: poll only while something is uploaded/processing —
@@ -90,16 +95,16 @@ export function usePosts(status = "", opts: { accountId?: number | null; limit?:
   return useQuery({
     queryKey: ["posts", status, opts.accountId ?? "all", limit],
     queryFn: () => get(`/posts${qs ? `?${qs}` : ""}`),
-    refetchInterval: 30000,
+    refetchInterval: REALTIME_SAFETY_INTERVAL,
   });
 }
 export function useQueue() {
-  return useQuery({ queryKey: ["queue"], queryFn: () => get("/posts/queue"), refetchInterval: 30000 });
+  return useQuery({ queryKey: ["queue"], queryFn: () => get("/posts/queue"), refetchInterval: REALTIME_SAFETY_INTERVAL });
 }
 export function useRules() {
-  // Beat retires one-shot pins and pauses rules in the background; no WS
-  // event covers this key, so poll like the other live lists.
-  return useQuery({ queryKey: ["rules"], queryFn: () => get("/schedule"), refetchInterval: 30000 });
+  // WS schedule_update covers dashboard edits AND background retirements
+  // (one-shot pins) / pauses; the poll below is only a backstop.
+  return useQuery({ queryKey: ["rules"], queryFn: () => get("/schedule"), refetchInterval: REALTIME_SAFETY_INTERVAL });
 }
 export function useCaptions() {
   return useQuery({ queryKey: ["captions"], queryFn: () => get("/captions") });
@@ -111,9 +116,9 @@ export function useBios() {
   return useQuery({ queryKey: ["bios"], queryFn: () => get("/bios") });
 }
 export function useProxies() {
-  // No WS-only staleness: the checker lands every ~30 min and realtime can
-  // drop, so poll like the other live lists (the pipeline card polls 20s).
-  return useQuery({ queryKey: ["proxies"], queryFn: () => get("/proxies"), refetchInterval: 30000 });
+  // WS proxy_pool_update fires after every checker cycle; the poll below is
+  // only a backstop for dropped frames.
+  return useQuery({ queryKey: ["proxies"], queryFn: () => get("/proxies"), refetchInterval: REALTIME_SAFETY_INTERVAL });
 }
 export function useProxySources() {
   return useQuery({ queryKey: ["proxy-sources"], queryFn: () => get("/proxies/sources") });
@@ -128,7 +133,7 @@ export function useAudioStats() {
   return useQuery({ queryKey: ["audio-stats"], queryFn: () => get("/analytics/audio") });
 }
 export function useLogs() {
-  return useQuery({ queryKey: ["logs"], queryFn: () => get("/logs?limit=200"), refetchInterval: 30000 });
+  return useQuery({ queryKey: ["logs"], queryFn: () => get("/logs?limit=200"), refetchInterval: REALTIME_SAFETY_INTERVAL });
 }
 export function useSettings() {
   return useQuery({ queryKey: ["settings"], queryFn: () => get("/settings") });
@@ -149,8 +154,8 @@ export function useSystemHealth() {
 }
 export function useNotifications() {
   // Bell feed: recent notifications + unread count + upcoming slots.
-  // 30s poll — event-driven freshness comes from the watchdog task.
-  return useQuery({ queryKey: ["notifications"], queryFn: () => get("/notifications"), refetchInterval: 30000 });
+  // WS "notification" events push instantly; the poll is only a backstop.
+  return useQuery({ queryKey: ["notifications"], queryFn: () => get("/notifications"), refetchInterval: REALTIME_SAFETY_INTERVAL });
 }
 export function useMarkNotificationRead() {
   const qc = useQueryClient();
@@ -208,7 +213,7 @@ export function useFunnel() {
   return useQuery({
     queryKey: ["funnel"],
     queryFn: () => get<{ stages: { key: string; label: string; count: number }[] }>("/analytics/funnel"),
-    refetchInterval: 60000,
+    refetchInterval: REALTIME_SAFETY_INTERVAL,
   });
 }
 export interface HeatmapData {

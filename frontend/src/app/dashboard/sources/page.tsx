@@ -176,7 +176,7 @@ export default function SourcesPage() {
   const { data: probe } = useVideoSources(false);
   const probeList = (probe ?? []) as VideoSource[];
   const anyBusy = probeList.some((s) => s.status === "running" || s.status === "stopping");
-  const { data, isLoading, isError, refetch } = useVideoSources(anyBusy ? 3000 : 30000);
+  const { data, isLoading, isError, refetch } = useVideoSources(anyBusy ? 3000 : 300000);
 
   const create = useApiMutation("post", [["video-sources"]], "Source added");
   const remove = useApiMutation("delete", [["video-sources"]], "Source deleted");

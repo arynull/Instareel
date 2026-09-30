@@ -47,7 +47,7 @@ def fetch_all_analytics(force_refresh: bool = False):
     from app.models import Account, Post, PostStatus
     from app.services.instagram_service import InstagramService
     from app.tasks import sync_helpers as sched
-    from app.tasks.sync_helpers import log_event_sync, notify_sync
+    from app.tasks.sync_helpers import log_event_sync, notify_sync, publish_sync
     from app.utils.instagram_helpers import session_path_for
 
     try:
@@ -121,6 +121,10 @@ def fetch_all_analytics(force_refresh: bool = False):
             except Exception:
                 log.exception("analytics fetch failed for post %s", pid)
         log_event_sync("INFO", "system", f"Analytics refresh: {updated} posts updated")
+        # The dashboard's overview/cards poll on a safety interval; push so
+        # fresh view counts appear instantly. (log_event_sync above already
+        # pushed new_log for the log line itself.)
+        publish_sync("analytics_update", {"updated": updated})
         return {"updated": updated}
     except Exception as exc:  # noqa: BLE001
         # Same silent-death class check_and_post had: a crashing analytics
