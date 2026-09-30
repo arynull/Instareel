@@ -53,7 +53,7 @@ export function Sidebar() {
 export function Header() {
   const { username, logout } = useAuth();
   return (
-    <header className="surface flex h-16 items-center gap-3 border-b px-4 backdrop-blur md:hidden">
+    <header className="surface relative z-30 flex h-16 items-center gap-3 border-b px-4 backdrop-blur md:hidden">
       <span className="font-extrabold">IG Funnel</span>
       <div className="ml-auto flex min-w-0 items-center gap-2">
         <NotificationBell />
@@ -62,7 +62,7 @@ export function Header() {
         <button onClick={logout} className="btn-ghost shrink-0 !px-2" aria-label="Log out">
           <LogOut className="h-4 w-4" />
         </button>
-        <span className="max-w-[120px] truncate text-xs text-zinc-500" title={username ?? ""}>{username}</span>
+        <span className="hidden max-w-[120px] truncate text-xs text-zinc-500 min-[420px]:block" title={username ?? ""}>{username}</span>
       </div>
     </header>
   );

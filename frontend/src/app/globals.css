@@ -171,6 +171,12 @@ html.dark.black .btn-ghost:hover {
 }
 
 /* ---------- Motion ---------- */
+/* NOTE: the `to` keyframe uses `transform: none` (not translateY(0)) on
+ * purpose — with fill-mode `both` the final keyframe persists, and any
+ * non-none transform would leave every animated element as a permanent
+ * stacking context. That trapped fixed/z-index descendants (e.g. the
+ * mobile notification sheet inside the backdrop-blur header) underneath
+ * later siblings. `none` renders identically to translateY(0). */
 @keyframes fade-up {
   from {
     opacity: 0;
@@ -178,7 +184,7 @@ html.dark.black .btn-ghost:hover {
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
   }
 }
 .animate-fade-up {

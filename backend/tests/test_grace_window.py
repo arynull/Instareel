@@ -128,10 +128,19 @@ def _freeze(monkeypatch, at):
 def _tick(factory, monkeypatch):
     """Run one beat tick with a fake executor; return (result, fired_ids)."""
     fired = []
+
+    def _apply_async(args=None, countdown=0, **kw):
+        # Mirrors the production call: execute_post.apply_async(args=[post_id], countdown=...).
+        fired.append(args[0] if args else None)
+
+    def _delay(pid):
+        # The tick backstop dispatches unstamped/stale rows via .delay().
+        fired.append(pid)
+
     monkeypatch.setattr(
         post_tasks,
         "execute_post",
-        type("FakeTask", (), {"delay": staticmethod(lambda pid: fired.append(pid))}),
+        type("FakeTask", (), {"apply_async": staticmethod(_apply_async), "delay": staticmethod(_delay)}),
     )
     return post_tasks.check_and_post.apply().get(), fired
 
@@ -290,15 +299,16 @@ def test_pinned_video_waits_then_fires_in_window(factory, tmp_path, monkeypatch)
 
 
 def test_concurrent_tick_race_is_swallowed(factory, tmp_path, monkeypatch):
-    # Two ticks racing on the same slot: both pass the pre-checks, the
+    # Two ticks racing on the same rule slot: both pass the pre-checks, the
     # loser's INSERT hits uq_posts_account_slot. It must be swallowed —
     # one post total, and the tick completes normally.
-    acc_id, vids, _ = _seed(factory, tmp_path, [{"hour": 21, "minute": 0}], n_videos=2)
+    acc_id, vids, rule_ids = _seed(factory, tmp_path, [{"hour": 21, "minute": 0}], n_videos=2)
     with factory() as s:  # the "winner" tick's post, already committed…
         s.add(
             Post(
                 video_id=vids[0],
                 account_id=acc_id,
+                rule_id=rule_ids[0],
                 caption="c",
                 hashtags="",
                 status=PostStatus.posted,
@@ -377,7 +387,7 @@ def test_slot_unique_per_account_not_global(factory, tmp_path):
 
 
 def test_duplicate_slot_for_same_account_raises(factory, tmp_path):
-    # Same (account, slot) twice → the backstop constraint fires.
+    # Same (account, slot, rule) twice → the backstop constraint fires.
     with factory() as s:
         a = Account(
             username="u3",
@@ -398,12 +408,15 @@ def test_duplicate_slot_for_same_account_raises(factory, tmp_path):
             status=VideoStatus.processed,
         )
         s.add(v)
+        r = ScheduleRule(name="rr", day_of_week=-1, hour=21, minute=0, account_id=a.id, is_active=True)
+        s.add(r)
         s.flush()
         for _ in range(2):
             s.add(
                 Post(
                     video_id=v.id,
                     account_id=a.id,
+                    rule_id=r.id,
                     caption="",
                     hashtags="",
                     status=PostStatus.scheduled,
@@ -412,3 +425,145 @@ def test_duplicate_slot_for_same_account_raises(factory, tmp_path):
             )
         with pytest.raises(IntegrityError):
             s.commit()
+
+
+def test_same_slot_different_rules_allowed(factory, tmp_path):
+    # Same (account, slot) from two different rules → both rows allowed.
+    # This is the two-rules-at-4:30 case: each rule owns its slot.
+    with factory() as s:
+        a = Account(
+            username="u4",
+            password_enc=encrypt_secret("x"),
+            status=AccountStatus.active,
+            max_daily_posts=3,
+            posts_today=0,
+            created_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1),
+        )
+        s.add(a)
+        s.flush()
+        v = Video(
+            original_filename="z.mp4",
+            raw_path="r",
+            processed_path="r",
+            thumbnail_path="t",
+            md5_hash="h3",
+            status=VideoStatus.processed,
+        )
+        s.add(v)
+        rules = []
+        for i in (1, 2):
+            r = ScheduleRule(name=f"rz{i}", day_of_week=-1, hour=21, minute=0, account_id=a.id, is_active=True)
+            s.add(r)
+            rules.append(r)
+        s.flush()
+        for r in rules:
+            s.add(
+                Post(
+                    video_id=v.id,
+                    account_id=a.id,
+                    rule_id=r.id,
+                    caption="",
+                    hashtags="",
+                    status=PostStatus.scheduled,
+                    slot_for=SAT_21_00,
+                )
+            )
+        s.commit()  # must not raise
+        assert s.execute(select(func.count(Post.id))).scalar() == 2
+
+
+# 2026-09-30 is a Wednesday; the seeded rules are daily (dow=-1) so any day works.
+WED_04_30 = dt.datetime(2026, 9, 30, 4, 30, tzinfo=dt.timezone.utc)
+
+
+def test_two_rules_same_slot_both_fire(factory, tmp_path, monkeypatch):
+    # Regression: two rules at the same minute for the same account — each
+    # must fire its own post. The second used to be swallowed silently as
+    # "slot already fired" and never posted.
+    _, _, rule_ids = _seed(
+        factory, tmp_path,
+        [{"hour": 4, "minute": 30, "name": "r1"}, {"hour": 4, "minute": 30, "name": "r2"}],
+        n_videos=3,
+    )
+    _freeze(monkeypatch, WED_04_30)
+    result, fired = _tick(factory, monkeypatch)
+    assert result["created"] == 2
+    assert len(fired) == 2
+    posts = _posts(factory)
+    assert len(posts) == 2
+    assert {p.rule_id for p in posts} == set(rule_ids)
+    assert posts[0].video_id != posts[1].video_id  # different videos, no double-post
+    for p in posts:
+        assert as_aware_utc(p.slot_for) == WED_04_30
+
+
+def test_same_slot_pair_no_refire_across_ticks(factory, tmp_path, monkeypatch):
+    # Each rule still fires exactly once: later ticks inside the grace
+    # window must not create duplicates for either rule.
+    _seed(
+        factory, tmp_path,
+        [{"hour": 4, "minute": 30, "name": "r1"}, {"hour": 4, "minute": 30, "name": "r2"}],
+        n_videos=3,
+    )
+    _freeze(monkeypatch, WED_04_30)
+    result, _ = _tick(factory, monkeypatch)
+    assert result["created"] == 2
+    for m in range(1, 6):
+        _freeze(monkeypatch, WED_04_30 + dt.timedelta(minutes=m))
+        result, _ = _tick(factory, monkeypatch)
+        assert result["created"] == 0
+    assert len(_posts(factory)) == 2
+
+
+def test_legacy_null_rule_id_row_still_blocks(factory, tmp_path, monkeypatch):
+    # Rows created before migration 0019 have rule_id NULL and keep the old
+    # account-wide exactly-once semantics: they block every rule at that
+    # account+slot. (status=posted so already_scheduled can't be the blocker.)
+    acc_id, vids, _ = _seed(factory, tmp_path, [{"hour": 4, "minute": 30}], n_videos=2)
+    with factory() as s:
+        s.add(
+            Post(
+                video_id=vids[0],
+                account_id=acc_id,
+                rule_id=None,
+                caption="",
+                hashtags="",
+                status=PostStatus.posted,
+                posted_at=WED_04_30,
+                scheduled_for=WED_04_30,
+                slot_for=WED_04_30,
+            )
+        )
+        s.commit()
+    _freeze(monkeypatch, WED_04_30)
+    result, _ = _tick(factory, monkeypatch)
+    assert result["created"] == 0
+    assert len(_posts(factory)) == 1
+
+
+def test_already_scheduled_exempts_same_slot(factory, tmp_path, monkeypatch):
+    # A sibling rule's post for the identical slot must not trip the
+    # ±10 min guard; a post for any other slot (or a manual post) still does.
+    from app.tasks import sync_helpers as sched
+
+    _, _, rule_ids = _seed(factory, tmp_path, [{"hour": 4, "minute": 30}], n_videos=2)
+    now = dt.datetime.now(dt.timezone.utc)
+    with factory() as s:
+        v = s.execute(select(Video)).scalars().first()
+        rule = s.get(ScheduleRule, rule_ids[0])
+        s.add(
+            Post(
+                video_id=v.id,
+                account_id=rule.account_id,
+                rule_id=rule.id,
+                caption="",
+                hashtags="",
+                status=PostStatus.scheduled,
+                scheduled_for=now,
+                slot_for=WED_04_30,
+            )
+        )
+        s.commit()
+        assert sched.already_scheduled(s, rule, WED_04_30) is False
+        assert sched.already_scheduled(s, rule, WED_04_30 + dt.timedelta(minutes=5)) is True
+        assert sched.already_scheduled(s, rule) is True  # no exemption without slot

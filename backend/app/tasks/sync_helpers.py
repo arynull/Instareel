@@ -718,20 +718,28 @@ def due_rule_slots(session, at: "dt.datetime | None" = None):
 
 
 def slot_already_fired(session, rule: "ScheduleRule", slot_utc: dt.datetime) -> bool:
-    """True once ANY post row exists for this account+slot.
+    """True once THIS RULE has a post row for this account+slot.
 
-    One slot → at most one post row, ever: in-flight/done statuses AND
+    One rule slot → at most one post row, ever: in-flight/done statuses AND
     terminal ones (failed/deleted) all count — a failed slot is owned by the
     retry/reprocess machinery, not re-fired (avoids duplicate content on
     false-negative failures and failure loops on bad videos). Without this,
     every beat tick inside the grace window would queue another post for the
     same slot.
+
+    Two different rules at the same minute each fire their own post (the
+    second-resolution fire jitter spreads their actual post times apart), so
+    a sibling rule's row must NOT mark this rule's slot as fired. Rows
+    created before migration 0019 have rule_id NULL and still count for
+    every rule, preserving the old account-wide exactly-once behavior for
+    pre-upgrade slots.
     """
     from app.models import Post
 
     q = select(func.count(Post.id)).where(
         Post.slot_for == slot_utc,
         (Post.account_id == rule.account_id) if rule.account_id else True,
+        (Post.rule_id == rule.id) | (Post.rule_id.is_(None)),
     )
     return (session.execute(q).scalar() or 0) > 0
 
@@ -843,11 +851,17 @@ def account_skip_reason(session, account_id: "int | None") -> str | None:
     return "no active account with remaining daily capacity"
 
 
-def next_video(session, effect: "str | None" = None):
-    """Oldest processed video, preferring the rule's effect; fallback to any."""
+def next_video(session, effect: "str | None" = None, exclude_ids: "set[int] | frozenset[int] | None" = None):
+    """Oldest processed video, preferring the rule's effect; fallback to any.
+
+    ``exclude_ids`` skips videos already taken by an earlier rule in the
+    same tick, so two rules firing together each get their own video.
+    """
     from app.models import Video, VideoStatus
 
     base = select(Video).where(Video.status == VideoStatus.processed)
+    if exclude_ids:
+        base = base.where(Video.id.notin_(exclude_ids))
     if effect:
         preferred = base.where(Video.effect_preset == effect).order_by(Video.created_at.asc()).limit(1)
         video = session.execute(preferred).scalars().first()
@@ -878,8 +892,8 @@ def resolve_rule_video(session, rule: "ScheduleRule", used_ids: "set[int]") -> "
         if video.id in used_ids or video_already_queued(session, video.id):
             return None, "wait"
         return video, "fire"
-    video = next_video(session, rule.preferred_effect)
-    if not video or video.id in used_ids:
+    video = next_video(session, rule.preferred_effect, exclude_ids=used_ids)
+    if not video:
         return None, "empty"
     if video_already_queued(session, video.id):
         return None, "empty"
@@ -967,7 +981,18 @@ def find_blocking_sibling(session, post_id: int, video_id: int, now: "dt.datetim
     return None
 
 
-def already_scheduled(session, rule, window_min: int = 10) -> bool:
+def already_scheduled(session, rule, slot_utc: "dt.datetime | None" = None, window_min: int = 10) -> bool:
+    """True when another post is already scheduled within ±window_min of now.
+
+    Guards the grace window: while a fired slot's post is still in
+    ``scheduled`` status (waiting for its jittered fire time), later ticks
+    must not queue a second post for a nearby slot.
+
+    ``slot_utc`` exempts same-slot sibling posts: two rules firing at the
+    same minute each create their own post (the jitter spreads their fire
+    times apart), so rule B must not be blocked by rule A's post for the
+    identical slot. Manual posts (slot_for NULL) always count.
+    """
     from app.models import Post, PostStatus
 
     now = _now()
@@ -977,6 +1002,8 @@ def already_scheduled(session, rule, window_min: int = 10) -> bool:
         Post.scheduled_for <= now + dt.timedelta(minutes=window_min),
         (Post.account_id == rule.account_id) if rule.account_id else True,
     )
+    if slot_utc is not None:
+        q = q.where((Post.slot_for.is_(None)) | (Post.slot_for != slot_utc))
     return (session.execute(q).scalar() or 0) > 0
 
 

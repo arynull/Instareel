@@ -123,7 +123,7 @@ def check_and_post(self):
                     # without this, every tick in the grace window would
                     # queue another post for the same slot.
                     continue
-                if sched.already_scheduled(s, rule):
+                if sched.already_scheduled(s, rule, slot_utc):
                     _notify_skip(
                         rule, slot_utc,
                         "another post is already scheduled within ±10 min "
@@ -191,6 +191,7 @@ def check_and_post(self):
                 post = Post(
                     video_id=video.id,
                     account_id=account.id,
+                    rule_id=rule.id,
                     caption=caption,
                     hashtags=tags,
                     status=PostStatus.scheduled,

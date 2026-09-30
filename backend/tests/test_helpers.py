@@ -459,11 +459,23 @@ class TestResolveRuleVideo:
         r = self._rule(s)
         assert resolve_rule_video(s, r, set()) == (None, "empty")
         v1 = self._video(s)
-        self._video(s)
+        v2 = self._video(s)
         v, d = resolve_rule_video(s, r, set())
         assert d == "fire" and v is not None and v.id == v1.id  # oldest first
-        # Queue mode has no fall-through: oldest taken → nothing left.
-        assert resolve_rule_video(s, r, {v1.id}) == (None, "empty")
+        # Same tick, second rule at the same minute: the oldest video is
+        # already taken, so the rule falls through to the next-oldest
+        # processed video. Two rules at one slot each post their own video
+        # (their fire times spread apart by the second-resolution jitter).
+        # Queue order stays strict FIFO — oldest *remaining* first — and one
+        # pending post per video is still enforced (a taken video is never
+        # handed out twice). Without fall-through the second rule would
+        # starve until the first video actually posts (jitter + upload time
+        # usually exceed the grace window) and its slot would roll over to
+        # next week.
+        v, d = resolve_rule_video(s, r, {v1.id})
+        assert d == "fire" and v is not None and v.id == v2.id
+        # Nothing left once every processed video is taken.
+        assert resolve_rule_video(s, r, {v1.id, v2.id}) == (None, "empty")
 
     def test_pinned_dispositions(self):
         import datetime as dt

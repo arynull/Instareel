@@ -68,12 +68,14 @@ class Video(Base, TimestampMixin):
 
 class Post(Base, TimestampMixin):
     __tablename__ = "posts"
-    # One post row per schedule slot, ever: the grace window lets several
-    # beat ticks see the same slot, so (account_id, slot_for) is unique.
+    # One post row per rule slot, ever: the grace window lets several
+    # beat ticks see the same slot, so (account_id, slot_for, rule_id) is
+    # unique. Two rules at the same minute each get their own row — the
+    # second-resolution fire jitter spreads their actual post times apart.
     # SQLite/PG treat NULLs as distinct, so manual/API posts (slot_for NULL)
-    # never conflict with each other or with scheduler posts.
+    # and pre-0019 rows (rule_id NULL) never conflict with each other.
     __table_args__ = (
-        UniqueConstraint("account_id", "slot_for", name="uq_posts_account_slot"),
+        UniqueConstraint("account_id", "slot_for", "rule_id", name="uq_posts_account_slot"),
         # Mirrors migration 0016: without this, fresh create_all() DBs lack
         # the index that migrated DBs have (schema drift).
         Index("ix_posts_slot_for", "slot_for"),
@@ -90,8 +92,12 @@ class Post(Base, TimestampMixin):
     posted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Schedule slot (aware UTC) this post was created for — the rule's
     # wall-clock minute in SCHEDULE_TZ. NULL for manual/API posts.
-    # Powers the grace-window dedup: one slot → at most one post row.
+    # Powers the grace-window dedup: one rule slot → at most one post row.
     slot_for: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Which schedule rule created this post — NULL for manual/API posts and
+    # rows created before migration 0019. Powers per-rule exactly-once
+    # firing: two rules at the same minute each own their slot.
+    rule_id: Mapped[int | None] = mapped_column(ForeignKey("schedule_rules.id"), nullable=True)
     # When this post was handed to the slow lane (execute_post dispatched).
     # Powers the dispatch dedup: the per-minute tick atomically stamps only
     # unstamped rows, so a post waiting in the slow queue is never enqueued
