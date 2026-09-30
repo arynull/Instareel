@@ -2,11 +2,11 @@
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_admin, get_db
-from app.models import CaptionTemplate, HashtagSet, ScheduleRule
+from app.models import CaptionTemplate, HashtagSet, Post, ScheduleRule
 from app.schemas.content import (
     CaptionIn, CaptionOut, CaptionUpdate, HashtagSetIn, HashtagSetOut, HashtagSetUpdate,
     ScheduleRuleIn, ScheduleRuleOut, ScheduleRuleUpdate,
@@ -145,6 +145,15 @@ async def delete_rule(rule_id: int, _: str = Depends(get_current_admin), db: Asy
     r = await db.get(ScheduleRule, rule_id)
     if not r:
         raise HTTPException(404, "Rule not found")
+    # A fired rule owns posts via posts.rule_id (nullable FK, no ON DELETE
+    # behavior). Null out the link first so the commit doesn't die with a
+    # FK violation (500). The posts keep their full history
+    # (status/views/analytics) — they just become un-attributed, like
+    # pre-0019 rows, which slot_already_fired() already treats as
+    # account-wide blockers for their exact slot instant.
+    await db.execute(
+        update(Post).where(Post.rule_id == rule_id).values(rule_id=None)
+    )
     await db.delete(r)
     await db.commit()
     await _emit_schedule_update(rule_id=rule_id)

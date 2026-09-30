@@ -700,6 +700,59 @@ class TestResources:
         assert c.delete(f"/api/v1/captions/{cap.json()['id']}").status_code == 204
         assert c.delete(f"/api/v1/hashtags/{tag.json()['id']}").status_code == 204
 
+    def test_delete_rule_with_fired_posts_nullifies_rule_id(self, client):
+        """Deleting a rule that fired posts must not 500: the posts keep
+        their history, only the link to the deleted rule is cleared."""
+        c, maker, engine = client
+        # Mirror production: SQLite must enforce FKs here, otherwise the
+        # test passes even without the fix.
+        from sqlalchemy import event
+        from app.database import _sqlite_pragmas
+        event.listen(engine.sync_engine, "connect", _sqlite_pragmas)
+
+        acc = c.post("/api/v1/accounts", json={"username": "rdel", "password": "pw"}).json()["id"]
+        rid = c.post("/api/v1/schedule", json={"name": "morn", "hour": 6, "account_id": acc}).json()["id"]
+
+        async def seed():
+            import datetime as dt
+            async with maker() as s:
+                vid = (await s.execute(select(Video).where(Video.md5_hash == "rdel_v"))).scalar_one_or_none()
+                if vid is None:
+                    vid = Video(original_filename="v.mp4", raw_path="/tmp/v.mp4", md5_hash="rdel_v",
+                                status=VideoStatus.processed)
+                    s.add(vid)
+                    await s.flush()
+                s.add(Post(video_id=vid.id, account_id=acc, status=PostStatus.posted,
+                           slot_for=dt.datetime(2026, 9, 30, 6, 0, tzinfo=dt.timezone.utc),
+                           rule_id=rid, posted_at=dt.datetime(2026, 9, 30, 6, 5, tzinfo=dt.timezone.utc),
+                           views_7d=123, likes_7d=45, comments_7d=6, engagement_rate=9.5))
+                await s.commit()
+
+        asyncio.run(seed())
+
+        r = c.delete(f"/api/v1/schedule/{rid}")
+        assert r.status_code == 204, r.text
+        remaining = c.get("/api/v1/schedule").json()
+        assert all(x["id"] != rid for x in remaining)
+
+        async def check():
+            async with maker() as s:
+                posts = (await s.execute(select(Post))).scalars().all()
+                assert len(posts) == 1
+                p = posts[0]
+                assert p.rule_id is None
+                assert p.status == PostStatus.posted
+                assert p.views_7d == 123 and p.likes_7d == 45
+                assert p.comments_7d == 6 and p.engagement_rate == 9.5
+                assert p.posted_at is not None
+
+        asyncio.run(check())
+
+    def test_delete_rule_without_posts_still_204(self, client):
+        c, _, _ = client
+        rid = c.post("/api/v1/schedule", json={"name": "bare", "hour": 9}).json()["id"]
+        assert c.delete(f"/api/v1/schedule/{rid}").status_code == 204
+
     def test_analytics_logs_settings(self, client):
         c, maker, _ = client
 
