@@ -33,7 +33,7 @@ docker compose up --build
 | beat     | Celery Beat (per-minute scheduler, analytics 4h, bio rotation, proxy checks, cleanup) |
 | redis    | Broker + result backend + realtime pub/sub + progress keys |
 | frontend | Next.js 14 dashboard |
-| postgres | Optional — enable with `DATABASE_URL=postgresql+asyncpg://…` and `--profile postgres` |
+| postgres | Optional (`--profile postgres`) — see "Database → PostgreSQL" |
 
 Default is SQLite (`./data/app.db` bind-mounted from the repo root) — zero-config.
 
@@ -91,7 +91,7 @@ uvicorn app.main:app --reload
 WORKER_LANE=fast celery -A app.tasks.celery_app.celery worker --loglevel=info --pool=solo -Q fast --hostname=fast
 WORKER_LANE=slow celery -A app.tasks.celery_app.celery worker --loglevel=info --pool=solo -Q slow --hostname=slow
 celery -A app.tasks.celery_app.celery beat --loglevel=info
-alembic upgrade head          # REQUIRED on existing DBs — startup only creates missing *tables*, never new *columns*
+alembic upgrade head          # REQUIRED on existing DBs — the startup schema gate refuses to boot when the DB is behind the code
 ```
 
 Frontend:
@@ -114,11 +114,88 @@ NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 
 ## Database
 
-Alembic migrations `0001_initial` → … → `0018_post_dispatched_at` cover the whole
-schema — always run `alembic upgrade head` after pulling.
-Models live in `backend/app/models/`; secrets (IG passwords, proxy passwords)
-are Fernet-encrypted at rest — set a persistent `FERNET_KEY` in `.env`
-(changing it later makes stored credentials unreadable).
+Alembic migrations `0001_initial` → … → `0019_post_rule_id` cover the whole
+schema. Models live in `backend/app/models/`; secrets (IG passwords, proxy
+passwords) are Fernet-encrypted at rest — set a persistent `FERNET_KEY` in
+`.env` (changing it later makes stored credentials unreadable).
+
+### Startup schema gate (fail fast, never silent drift)
+
+On boot, the backend compares the revisions in the DB's `alembic_version`
+table against the code's alembic heads (`backend/app/core/db_gate.py`). A
+fresh database is created from the models and stamped head; an existing one
+that is behind/ahead/unversioned **refuses to start** with a
+`DatabaseVersionError` naming the exact recovery command. This kills the
+recurring incident pattern where new code ran on an unmigrated DB and every
+scheduler tick died with `no such column` while nothing alerted.
+
+```bash
+# THE migration command — backup first, then upgrade, then verify:
+./scripts/migrate.sh
+```
+
+`migrate.sh` takes a backup (SQLite snapshot via `backup.sh`, or `pg_dump`
+for Postgres), runs `alembic upgrade head` in a **one-off** backend container
+(`docker compose run --rm backend …` — works even when the backend is
+crash-looping, and always uses the fresh image's migration files), and
+aborts unless the DB reports `(head)` afterwards. The upgrade never runs
+without a backup: a backup failure stops the script before alembic starts.
+
+Recovery cheat-sheet:
+
+| State | Command |
+|---|---|
+| Normal deploy with new migration | `./scripts/migrate.sh`, then rebuild/restart |
+| Backend refuses to boot: "schema is BEHIND" | `./scripts/migrate.sh` (backs up, then migrates) |
+| Backend refuses to boot: "no alembic_version" (legacy `create_all` DB) | verify schema == code, then `docker compose run --rm backend alembic stamp head` |
+| Emergency bypass (opts back into silent drift) | `SKIP_DB_VERSION_CHECK=1` — never in normal operation |
+
+### PostgreSQL (optional, recommended for production)
+
+SQLite is the zero-config default (`./data/app.db`). For Postgres:
+
+```bash
+# .env
+POSTGRES_USER=igfunnel
+POSTGRES_PASSWORD=<redacted>   # generate a real one; never commit it
+POSTGRES_DB=igfunnel
+DATABASE_URL=<redacted>
+# SYNC_DATABASE_URL derives automatically (+asyncpg -> +psycopg2)
+docker compose --profile postgres up -d
+./scripts/migrate.sh            # builds the schema via alembic, with backup
+```
+
+`DATABASE_URL` is the async URL (FastAPI, `+asyncpg`); `SYNC_DATABASE_URL` is
+the sync URL (Celery, `+psycopg2`) and is derived automatically when left at
+its default. All 19 migrations, the models (`str` enums → native PG enums,
+timezone-aware datetimes, generic JSON/BigInteger), the SQLite→PG data
+migration, and `pg_dump | gzip` backups are tested against a real PostgreSQL
+server (16.2; the compose file pins `postgres:15-alpine`, same major-line
+behavior for everything used here).
+
+**Moving existing SQLite data to Postgres** (one-time, stack stopped):
+
+```bash
+docker compose down   # stop the sqlite stack so the copy sees a quiet DB
+docker compose --profile postgres up -d postgres
+docker compose run --rm -e DATABASE_URL='postgresql+asyncpg://igfunnel:<pw>@postgres:5432/igfunnel' \
+  backend alembic upgrade head
+./scripts/backup.sh   # safety snapshot of the sqlite DB
+# Run the copy INSIDE a one-off backend container (<pw> = POSTGRES_PASSWORD):
+# only there does the hostname `postgres` resolve — the compose file
+# publishes no PG port to the host, so @localhost:5432 would fail — and
+# /data/app.db is the sqlite file via the ./data:/data mount.
+docker compose run --rm -v ./scripts:/scripts \
+  -e DATABASE_URL='postgresql+psycopg2://igfunnel:<pw>@postgres:5432/igfunnel' \
+  backend python3 /scripts/migrate_sqlite_to_postgres.py /data/app.db
+# then point DATABASE_URL at postgres in .env and bring the stack up
+```
+
+The script refuses to run into a non-empty target or a schema not at head,
+copies every table in FK order inside one transaction (any failure rolls the
+whole copy back), localizes naive SQLite timestamps to UTC, resets all `id`
+sequences to `MAX(id)`, and re-counts every table afterwards. The source
+SQLite file is opened read-only and never modified.
 
 ## Backup & restore
 

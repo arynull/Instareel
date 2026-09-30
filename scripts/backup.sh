@@ -37,7 +37,7 @@ if [ ! -f ./data/app.db ]; then
 fi
 
 echo "backup: snapshotting SQLite (online-consistent)..."
-docker compose exec -T backend python3 -c "
+SNAP_SQL="
 import sqlite3
 src = sqlite3.connect('/data/app.db', timeout=30)
 dst = sqlite3.connect('/data/backups/app-$STAMP.db')
@@ -46,6 +46,18 @@ with dst:
 dst.close(); src.close()
 print('snapshot ok')
 "
+# Prefer the running backend (fast path). If it is down or crash-looping —
+# e.g. held down by the startup schema gate ahead of a migration — fall back
+# to a one-off container: the command override means the app (and its gate)
+# never boots, we only need /data mounted. Without this fallback, a schema
+# mismatch would deadlock: no backup without the backend, no backend without
+# the migration, no migration without the backup.
+if docker compose exec -T backend python3 -c "$SNAP_SQL" 2>/dev/null; then
+  :
+else
+  echo "backup: running backend unavailable — snapshotting via one-off container..."
+  docker compose run --rm -T backend python3 -c "$SNAP_SQL"
+fi
 
 echo "backup: archiving (db snapshot + media)..."
 # Absolute -C args: each is resolved independently, so 'media' really is

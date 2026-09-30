@@ -93,6 +93,12 @@ class Settings(BaseSettings):
     # of silently lost. 0 = legacy exact-minute behavior.
     SCHEDULE_GRACE_MINUTES: int = 5
 
+    # Database-version gate (app/core/db_gate.py): at startup the backend
+    # refuses to boot when the DB schema is behind the code (the recurring
+    # "no such column" incident pattern). Set ONLY for emergencies — it opts
+    # back into silent schema drift.
+    SKIP_DB_VERSION_CHECK: bool = False
+
     MEDIA_ROOT: str = "./media"
     MAX_UPLOAD_MB: int = 500
     AUTO_PROCESS_ON_UPLOAD: bool = True

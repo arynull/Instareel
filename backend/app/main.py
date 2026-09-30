@@ -13,7 +13,7 @@ from app.api.router import router, ws_mount
 from app.config import settings
 from app.core.exceptions import AppError
 from app.core.middleware import setup_middleware
-from app.database import Base, engine
+from app.database import Base, engine, sync_engine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("igfunnel")
@@ -74,8 +74,25 @@ async def lifespan(application: FastAPI):
     from app.utils.instagram_helpers import harden_session_dir
 
     harden_session_dir(settings.MEDIA_ROOT)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Level-1 hardening: never boot new code on an old schema. Fresh DBs are
+    # created from the code's metadata and stamped head; existing DBs must
+    # already be at head or startup fails LOUDLY (DatabaseVersionError) with
+    # the exact recovery command — the 0018/0019 "no such column" incidents
+    # came from silently running migrated code on an unmigrated database.
+    # SKIP_DB_VERSION_CHECK=1 (emergencies only) restores the legacy behavior:
+    # create_all with no version check at all.
+    from app.core.db_gate import assert_db_at_head, db_is_empty, stamp_head
+
+    skip_gate = settings.SKIP_DB_VERSION_CHECK
+    if skip_gate:
+        log.warning("db_gate: SKIP_DB_VERSION_CHECK=1 — schema drift will NOT be detected")
+    if db_is_empty(sync_engine):
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        if not skip_gate:
+            stamp_head(sync_engine)
+    elif not skip_gate:
+        assert_db_at_head(sync_engine, settings.SYNC_DATABASE_URL)
     from app.api.system import seed_default_settings
 
     n = await seed_default_settings()

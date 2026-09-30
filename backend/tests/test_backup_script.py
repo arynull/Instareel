@@ -3,6 +3,8 @@
 Runs the real script against a fixture project dir with a fake `docker`
 executable on PATH that emulates `docker compose exec -T backend python3 -c`
 by copying the fixture DB to the snapshot path the script asks for.
+A second fake emulates a DOWN backend: `compose exec` fails and the script
+must fall back to a one-off `compose run` container.
 """
 import os
 import re
@@ -24,6 +26,19 @@ assert m, "fake docker: could not find snapshot path in: " + code[:200]
 shutil.copy(os.path.join(fixture, "data", "app.db"),
             os.path.join(fixture, "data", "backups", m.group(1)))
 print("snapshot ok")
+"""
+
+FAKE_DOCKER_BACKEND_DOWN = """#!/usr/bin/env python3
+import os, sys
+fixture = os.environ["FAKE_DOCKER_FIXTURE"]
+# argv is either [docker, compose, exec, -T, backend, python3, -c, code]
+# or           [docker, compose, run, --rm, -T, backend, python3, -c, code]
+if "exec" in sys.argv:
+    print("fake docker: backend not running", file=sys.stderr)
+    sys.exit(1)
+assert "run" in sys.argv, sys.argv
+code = sys.argv[-1].replace("/data/", fixture + "/data/")
+exec(compile(code, "<snapshot>", "exec"))
 """
 
 
@@ -110,3 +125,44 @@ def test_sanity_check_has_no_sigpipe_race():
     assert "| grep -q" not in src, (
         "tar | grep -q under pipefail SIGPIPE-races; capture the listing first"
     )
+
+
+def test_backup_falls_back_to_one_off_container_when_backend_down(
+    fixture_proj, tmp_path, monkeypatch
+):
+    """The backup must not depend on a RUNNING backend.
+
+    Deadlock scenario: the startup schema gate holds the backend in a
+    crash loop until a migration runs, but migrate.sh refuses to migrate
+    without a backup first. backup.sh must then snapshot via a one-off
+    `docker compose run` container (command override — the gate never boots).
+    """
+    bindir = tmp_path / "bin-down"
+    bindir.mkdir()
+    fake = bindir / "docker"
+    fake.write_text(FAKE_DOCKER_BACKEND_DOWN)
+    fake.chmod(0o755)
+    monkeypatch.setenv(
+        "PATH", str(bindir) + os.pathsep + os.environ["PATH"]
+    )
+
+    r = subprocess.run(
+        ["bash", "scripts/backup.sh"], cwd=fixture_proj,
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "one-off container" in r.stdout
+
+    tarballs = list((fixture_proj / "data" / "backups").glob("instareel-*.tar.gz"))
+    assert len(tarballs) == 1
+    extract = tmp_path / "restore-down"
+    extract.mkdir()
+    tarfile.open(tarballs[0]).extractall(extract)
+    db_members = [
+        m for m in tarfile.open(tarballs[0]).getnames()
+        if re.fullmatch(r"app-\d{8}-\d{6}\.db", m)
+    ]
+    assert len(db_members) == 1
+    con = sqlite3.connect(extract / db_members[0])
+    assert con.execute("SELECT v FROM t").fetchone()[0] == "hello"
+    con.close()
