@@ -29,6 +29,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt pytest
 
+      - name: Install ffmpeg
+        # test_media_e2e.py shells out to the ffmpeg/ffprobe binaries;
+        # ubuntu-latest runners don't ship them.
+        uses: FedericoCarboni/setup-ffmpeg@v3
+
       - name: Run pytest
         working-directory: backend
         run: python -m pytest tests/ -q
