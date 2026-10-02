@@ -102,7 +102,7 @@ quarantined + critical notification), but the upload itself is lost.
 | 10 min | `reap_stale_posting` | Fails posts wedged in `posting` (worker died mid-upload) |
 | 30 min | `check_all_proxies` | Proxy health checks |
 | 3 h (:17) | `refresh_proxy_pool` | Proxy pool refresh |
-| 4 h | `fetch_all_analytics` | Reels view/like counts sweep (slow lane) |
+| 4 h | `fetch_all_analytics` | Reels view/like counts sweep (slow lane). Reads `play_count` (live reel metric) and prefers `ig_play_count` (the app's unified views metric) when present. An all-zero result on a post under 48 h old is treated as "not indexed yet" and retried on the next sweep instead of freezing a zero in the panel |
 | 6 h (:23) | `scan_shadowban` | View-collapse heuristic per account (fast lane, DB scan only) |
 | daily 00:00 | `reset_daily_counts` | Per-account daily post counters |
 | daily 04:00 | `clean_old_media` | Old media cleanup |

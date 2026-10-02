@@ -86,6 +86,24 @@ def _persisted_mismatches(sent: dict, actual: dict) -> list:
     return problems
 
 
+def _raw_media_counter(cl, key: str):
+    """Pull one counter from the untouched v1 media payload (``cl.last_json``).
+
+    instagrapi's ``Media`` model drops fields it doesn't declare — e.g.
+    ``ig_play_count``, Instagram's unified views metric (the number the app
+    itself shows). Reading it from the raw response when the last call was
+    media info recovers counters the parsed model loses. Never raises:
+    returns None on any shape mismatch.
+    """
+    try:
+        items = (getattr(cl, "last_json", None) or {}).get("items")
+        if items:
+            return items[0].get(key)
+    except Exception as exc:  # noqa: BLE001 — best effort only
+        log.debug("raw media counter %s unreadable: %s", key, exc)
+    return None
+
+
 class InstagramService:
     def __init__(self, proxy_url: str | None = None, session_path: str | None = None):
         self.proxy_url = proxy_url
@@ -369,7 +387,12 @@ class InstagramService:
             # counter when both are present — play_count must win.
             raw_view = info.get("view_count")
             raw_play = info.get("play_count")
-            views = raw_play or raw_view or 0
+            # ig_play_count is the unified views metric the app shows; for
+            # fresh media it can carry the count while play_count/view_count
+            # still read 0 (private-API indexing lag). Dropped by the
+            # extractor, so read it from the raw payload and prefer it.
+            raw_ig_play = _raw_media_counter(cl, "ig_play_count")
+            views = raw_ig_play or raw_play or raw_view or 0
             if raw_view and raw_play and raw_view != raw_play:
                 log.debug(
                     "media_info %s: view_count=%s shadowed by play_count=%s",

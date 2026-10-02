@@ -13,6 +13,14 @@ log = logging.getLogger("igfunnel.tasks")
 MAX_ANALYTICS_PER_RUN = 20
 # Skip posts checked more recently than this (hours).
 ANALYTICS_MIN_INTERVAL_HOURS = 3
+# An all-zero media_info result on a young post is "not indexed yet", not
+# data. Verified 2026-10-02: IG's private API served 0/0/0 for a reel at
+# 25h old (the app already showed views) and real numbers by 36h. Posts
+# under this age with all-zero counters are left alone (no overwrite, no
+# last_analytics_check stamp) so they stay first in line on the next
+# sweep instead of freezing a zero in the panel. Past this age an
+# all-zero result is written as genuine data so the sweep keeps moving.
+ZERO_PENDING_HOURS = 48
 
 
 def _post_age_hours(posted_at: "dt.datetime | None", now: "dt.datetime") -> float:
@@ -75,6 +83,7 @@ def fetch_all_analytics(force_refresh: bool = False):
                 or last <= recent
             ][:MAX_ANALYTICS_PER_RUN]
         updated = 0
+        pending = 0
         for pid, acc_id, media_id, posted_at in items:
             # Human-like pacing between API calls instead of a tight loop.
             time.sleep(random.uniform(3, 10))
@@ -103,6 +112,19 @@ def fetch_all_analytics(force_refresh: bool = False):
                 comments = info.get("comment_count", 0)
                 views = info.get("view_count", 0)
                 age_h = _post_age_hours(posted_at, dt.datetime.now(dt.timezone.utc))
+                if views == 0 and likes == 0 and comments == 0 and age_h < ZERO_PENDING_HOURS:
+                    # IG hasn't indexed this media yet (or serves zeros for
+                    # another reason): keep previous values and do NOT stamp
+                    # last_analytics_check, so the post stays first in line
+                    # for the next sweep instead of freezing a zero in the
+                    # panel. The Checked column stays "—" — honest signal
+                    # that no real data has landed yet.
+                    pending += 1
+                    log.info(
+                        "analytics: post %s (ig %s) pending — IG serving zeros at %.1fh old",
+                        pid, media_id, age_h,
+                    )
+                    continue
                 eng = round((likes + comments) / max(1, views) * 100, 2) if views else 0.0
                 with SyncSessionLocal() as s:
                     p = s.get(Post, pid)
@@ -120,12 +142,15 @@ def fetch_all_analytics(force_refresh: bool = False):
                         )
             except Exception:
                 log.exception("analytics fetch failed for post %s", pid)
-        log_event_sync("INFO", "system", f"Analytics refresh: {updated} posts updated")
+        summary = f"Analytics refresh: {updated} posts updated"
+        if pending:
+            summary += f", {pending} pending (no data from IG yet)"
+        log_event_sync("INFO", "system", summary)
         # The dashboard's overview/cards poll on a safety interval; push so
         # fresh view counts appear instantly. (log_event_sync above already
         # pushed new_log for the log line itself.)
-        publish_sync("analytics_update", {"updated": updated})
-        return {"updated": updated}
+        publish_sync("analytics_update", {"updated": updated, "pending": pending})
+        return {"updated": updated, "pending": pending}
     except Exception as exc:  # noqa: BLE001
         # Same silent-death class check_and_post had: a crashing analytics
         # sweep froze every view count with zero user-visible signal (the
