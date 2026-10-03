@@ -13,6 +13,16 @@ log = logging.getLogger("igfunnel.tasks")
 MAX_ANALYTICS_PER_RUN = 20
 # Skip posts checked more recently than this (hours).
 ANALYTICS_MIN_INTERVAL_HOURS = 3
+# Young-post fast lane: reels posted within the last 24h move fast —
+# views can jump 6 -> 163 in ten minutes while the 4h sweep still shows
+# the stale number. fetch_fresh_analytics runs hourly and re-checks only
+# these young posts, at most hourly per post, so the panel tracks the
+# Instagram app within ~1h instead of ~4h. API volume stays small: young
+# posts are few, and the 1h per-post interval plus the per-run cap bound
+# the lookups.
+FRESH_ANALYTICS_MAX_AGE_HOURS = 24
+FRESH_ANALYTICS_MIN_INTERVAL_HOURS = 1
+MAX_FRESH_ANALYTICS_PER_RUN = 10
 # An all-zero media_info result on a young post is "not indexed yet", not
 # data. Verified 2026-10-02: IG's private API served 0/0/0 for a reel at
 # 25h old (the app already showed views) and real numbers by 36h. Posts
@@ -44,19 +54,12 @@ def fetch_all_analytics(force_refresh: bool = False):
     they were checked within ANALYTICS_MIN_INTERVAL_HOURS — otherwise a manual
     refresh right after a scheduled sweep would no-op and feel broken.
     """
-    import random
-    import time
-
     from sqlalchemy import select
 
-    from app.config import settings
-    from app.core.security import decrypt_secret
     from app.database import SyncSessionLocal
-    from app.models import Account, Post, PostStatus
-    from app.services.instagram_service import InstagramService
+    from app.models import Post, PostStatus
     from app.tasks import sync_helpers as sched
-    from app.tasks.sync_helpers import log_event_sync, notify_sync, publish_sync
-    from app.utils.instagram_helpers import session_path_for
+    from app.tasks.sync_helpers import log_event_sync, publish_sync
 
     try:
         # NOTE: no startup sleep here. This task runs on the --pool=solo
@@ -82,66 +85,7 @@ def fetch_all_analytics(force_refresh: bool = False):
                 or (last := sched.as_aware_utc(p.last_analytics_check)) is None
                 or last <= recent
             ][:MAX_ANALYTICS_PER_RUN]
-        updated = 0
-        pending = 0
-        for pid, acc_id, media_id, posted_at in items:
-            # Human-like pacing between API calls instead of a tight loop.
-            time.sleep(random.uniform(3, 10))
-            if not media_id:
-                continue
-            try:
-                with SyncSessionLocal() as s:
-                    acc = s.get(Account, acc_id)
-                    if not acc:
-                        continue
-                    if sched.account_age_days(acc.created_at) < sched.ANALYTICS_MIN_AGE_DAYS:
-                        continue
-                    if not sched.account_reachable(s, acc):
-                        continue
-                    username, password = acc.username, decrypt_secret(acc.password_enc)
-                    purl = sched.resolve_proxy_url(s, acc)
-                svc = InstagramService(
-                    proxy_url=purl, session_path=session_path_for(username, settings.MEDIA_ROOT)
-                )
-                info = svc.media_info(username, media_id)
-                if not info:
-                    # Failed lookup returns {} — never let it zero out good stats.
-                    log.warning("analytics: no data for post %s, keeping previous values", pid)
-                    continue
-                likes = info.get("like_count", 0)
-                comments = info.get("comment_count", 0)
-                views = info.get("view_count", 0)
-                age_h = _post_age_hours(posted_at, dt.datetime.now(dt.timezone.utc))
-                if views == 0 and likes == 0 and comments == 0 and age_h < ZERO_PENDING_HOURS:
-                    # IG hasn't indexed this media yet (or serves zeros for
-                    # another reason): keep previous values and do NOT stamp
-                    # last_analytics_check, so the post stays first in line
-                    # for the next sweep instead of freezing a zero in the
-                    # panel. The Checked column stays "—" — honest signal
-                    # that no real data has landed yet.
-                    pending += 1
-                    log.info(
-                        "analytics: post %s (ig %s) pending — IG serving zeros at %.1fh old",
-                        pid, media_id, age_h,
-                    )
-                    continue
-                eng = round((likes + comments) / max(1, views) * 100, 2) if views else 0.0
-                with SyncSessionLocal() as s:
-                    p = s.get(Post, pid)
-                    if p:
-                        if age_h <= 30:
-                            p.views_24h, p.likes_24h, p.comments_7d = views, likes, comments
-                        p.views_7d, p.likes_7d, p.comments_7d = views, likes, comments
-                        p.engagement_rate = eng
-                        p.last_analytics_check = dt.datetime.now(dt.timezone.utc)
-                        s.commit()
-                        updated += 1
-                        log.info(
-                            "analytics: post %s (ig %s) -> views=%s likes=%s comments=%s",
-                            pid, media_id, views, likes, comments,
-                        )
-            except Exception:
-                log.exception("analytics fetch failed for post %s", pid)
+        updated, pending = _run_analytics_sweep(items, now)
         summary = f"Analytics refresh: {updated} posts updated"
         if pending:
             summary += f", {pending} pending (no data from IG yet)"
@@ -152,24 +96,172 @@ def fetch_all_analytics(force_refresh: bool = False):
         publish_sync("analytics_update", {"updated": updated, "pending": pending})
         return {"updated": updated, "pending": pending}
     except Exception as exc:  # noqa: BLE001
-        # Same silent-death class check_and_post had: a crashing analytics
-        # sweep froze every view count with zero user-visible signal (the
-        # skipped-0018-migration incident did exactly this — select(Post)
-        # raised on every run). Notify once per error class, deduped while
-        # unread; warning, not critical — posting itself is unaffected.
-        log.exception("fetch_all_analytics failed")
-        err = f"{type(exc).__name__}: {exc}".strip().rstrip(":")[:500]
-        log_event_sync("ERROR", "system", f"Analytics refresh failed: {err}")
-        notify_sync(
-            "analytics_error",
-            "warning",
-            "Analytics refresh failed",
-            f"The periodic view/like refresh hit an error and view counts "
-            f"are stale: {err}.",
-            link="/dashboard/logs",
-            dedup_key=f"analytics_error:{type(exc).__name__}",
-        )
+        _notify_analytics_failure(exc)
         return {"error": "failed"}
+
+
+@celery.task(name="tasks.analytics_tasks.fetch_fresh_analytics")
+def fetch_fresh_analytics():
+    """Hourly fast lane for young reels (see FRESH_ANALYTICS_* above).
+
+    Only posts younger than FRESH_ANALYTICS_MAX_AGE_HOURS are considered,
+    each at most once per FRESH_ANALYTICS_MIN_INTERVAL_HOURS. Shares the
+    per-post fetch logic (including the all-zero pending guard) with the
+    4h sweep via _refresh_one_post.
+    """
+    from sqlalchemy import select
+
+    from app.database import SyncSessionLocal
+    from app.models import Post, PostStatus
+    from app.tasks import sync_helpers as sched
+    from app.tasks.sync_helpers import log_event_sync, publish_sync
+
+    try:
+        now = dt.datetime.now(dt.timezone.utc)
+        fresh_cutoff = now - dt.timedelta(hours=FRESH_ANALYTICS_MAX_AGE_HOURS)
+        recent = now - dt.timedelta(hours=FRESH_ANALYTICS_MIN_INTERVAL_HOURS)
+        with SyncSessionLocal() as s:
+            posts = (
+                s.execute(
+                    select(Post)
+                    .where(Post.status == PostStatus.posted, Post.posted_at >= fresh_cutoff)
+                    .order_by(Post.last_analytics_check.asc().nulls_first())
+                    .limit(MAX_FRESH_ANALYTICS_PER_RUN * 2)
+                )
+            ).scalars().all()
+            items = [
+                (p.id, p.account_id, p.ig_media_id, p.posted_at)
+                for p in posts
+                if (last := sched.as_aware_utc(p.last_analytics_check)) is None
+                or last <= recent
+            ][:MAX_FRESH_ANALYTICS_PER_RUN]
+        updated, pending = _run_analytics_sweep(items, now)
+        summary = f"Fresh analytics refresh: {updated} posts updated"
+        if pending:
+            summary += f", {pending} pending (no data from IG yet)"
+        log_event_sync("INFO", "system", summary)
+        publish_sync("analytics_update", {"updated": updated, "pending": pending})
+        return {"updated": updated, "pending": pending}
+    except Exception as exc:  # noqa: BLE001
+        _notify_analytics_failure(exc)
+        return {"error": "failed"}
+
+
+def _run_analytics_sweep(items, now):
+    """Refresh one batch of posts; returns (updated, pending) counts."""
+    updated = 0
+    pending = 0
+    for pid, acc_id, media_id, posted_at in items:
+        outcome = _refresh_one_post(pid, acc_id, media_id, posted_at, now)
+        if outcome == "updated":
+            updated += 1
+        elif outcome == "pending":
+            pending += 1
+    return updated, pending
+
+
+def _refresh_one_post(pid, acc_id, media_id, posted_at, now):
+    """Fetch IG stats for one post and store them.
+
+    Returns "updated", "pending" (all-zero result on a young post — IG
+    hasn't indexed it yet), "skipped" (no media id / account / reachable
+    account / empty lookup — never zeroes out good stats), or "failed".
+    Paces itself with a human-like sleep between API calls.
+    """
+    import random
+    import time
+
+    from app.config import settings
+    from app.core.security import decrypt_secret
+    from app.database import SyncSessionLocal
+    from app.models import Account, Post
+    from app.services.instagram_service import InstagramService
+    from app.tasks import sync_helpers as sched
+    from app.utils.instagram_helpers import session_path_for
+
+    # Human-like pacing between API calls instead of a tight loop.
+    time.sleep(random.uniform(3, 10))
+    if not media_id:
+        return "skipped"
+    try:
+        with SyncSessionLocal() as s:
+            acc = s.get(Account, acc_id)
+            if not acc:
+                return "skipped"
+            if sched.account_age_days(acc.created_at) < sched.ANALYTICS_MIN_AGE_DAYS:
+                return "skipped"
+            if not sched.account_reachable(s, acc):
+                return "skipped"
+            username, password = acc.username, decrypt_secret(acc.password_enc)
+            purl = sched.resolve_proxy_url(s, acc)
+        svc = InstagramService(
+            proxy_url=purl, session_path=session_path_for(username, settings.MEDIA_ROOT)
+        )
+        info = svc.media_info(username, media_id)
+        if not info:
+            # Failed lookup returns {} — never let it zero out good stats.
+            log.warning("analytics: no data for post %s, keeping previous values", pid)
+            return "skipped"
+        likes = info.get("like_count", 0)
+        comments = info.get("comment_count", 0)
+        views = info.get("view_count", 0)
+        age_h = _post_age_hours(posted_at, now)
+        if views == 0 and likes == 0 and comments == 0 and age_h < ZERO_PENDING_HOURS:
+            # IG hasn't indexed this media yet (or serves zeros for
+            # another reason): keep previous values and do NOT stamp
+            # last_analytics_check, so the post stays first in line
+            # for the next sweep instead of freezing a zero in the
+            # panel. The Checked column stays "—" — honest signal
+            # that no real data has landed yet.
+            log.info(
+                "analytics: post %s (ig %s) pending — IG serving zeros at %.1fh old",
+                pid, media_id, age_h,
+            )
+            return "pending"
+        eng = round((likes + comments) / max(1, views) * 100, 2) if views else 0.0
+        with SyncSessionLocal() as s:
+            p = s.get(Post, pid)
+            if p:
+                if age_h <= 30:
+                    p.views_24h, p.likes_24h, p.comments_7d = views, likes, comments
+                p.views_7d, p.likes_7d, p.comments_7d = views, likes, comments
+                p.engagement_rate = eng
+                p.last_analytics_check = dt.datetime.now(dt.timezone.utc)
+                s.commit()
+                log.info(
+                    "analytics: post %s (ig %s) -> views=%s likes=%s comments=%s",
+                    pid, media_id, views, likes, comments,
+                )
+                return "updated"
+        return "skipped"
+    except Exception:
+        log.exception("analytics fetch failed for post %s", pid)
+        return "failed"
+
+
+def _notify_analytics_failure(exc):
+    """One user-visible signal for the silent-death class of sweep crash.
+
+    A crashing analytics sweep used to freeze every view count with zero
+    user-visible signal (the skipped-0018-migration incident did exactly
+    this — select(Post) raised on every run). Notify once per error class,
+    deduped while unread; warning, not critical — posting itself is
+    unaffected.
+    """
+    from app.tasks.sync_helpers import log_event_sync, notify_sync
+
+    log.exception("fetch_all_analytics failed")
+    err = f"{type(exc).__name__}: {exc}".strip().rstrip(":")[:500]
+    log_event_sync("ERROR", "system", f"Analytics refresh failed: {err}")
+    notify_sync(
+        "analytics_error",
+        "warning",
+        "Analytics refresh failed",
+        f"The periodic view/like refresh hit an error and view counts "
+        f"are stale: {err}.",
+        link="/dashboard/logs",
+        dedup_key=f"analytics_error:{type(exc).__name__}",
+    )
 
 
 @celery.task(name="tasks.proxy_tasks.check_all_proxies")

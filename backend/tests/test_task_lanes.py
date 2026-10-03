@@ -87,6 +87,7 @@ def test_slow_tasks_routed_to_slow_queue():
         "tasks.post_tasks.execute_post",
         "tasks.source_tasks.ingest_source",
         "tasks.analytics_tasks.fetch_all_analytics",
+        "tasks.analytics_tasks.fetch_fresh_analytics",
     }
     for name in celery_app_module.SLOW_TASKS:
         assert routes[name] == {"queue": "slow"}, name
@@ -139,14 +140,18 @@ def test_fast_lane_beat_entries_dont_include_slow_tasks():
 
 
 def test_beat_driven_slow_tasks_stay_on_slow_queue():
-    """fetch-analytics is beat-driven AND slow-lane: it must resolve to the
-    slow queue so the 4h analytics sweep never blocks scheduler ticks."""
+    """fetch-analytics / fetch-fresh-analytics are beat-driven AND
+    slow-lane: they must resolve to the slow queue so the analytics
+    sweeps never block scheduler ticks."""
     routes = celery_app_module.celery.conf.task_routes
     default = celery_app_module.celery.conf.task_default_queue
     schedule = celery_app_module.celery.conf.beat_schedule
     beat_tasks = {cfg["task"] for cfg in schedule.values()}
     slow_on_beat = beat_tasks & set(celery_app_module.SLOW_TASKS)
-    assert slow_on_beat == {"tasks.analytics_tasks.fetch_all_analytics"}
+    assert slow_on_beat == {
+        "tasks.analytics_tasks.fetch_all_analytics",
+        "tasks.analytics_tasks.fetch_fresh_analytics",
+    }
     for task in slow_on_beat:
         assert routes[task]["queue"] == "slow"
     assert default == "fast"

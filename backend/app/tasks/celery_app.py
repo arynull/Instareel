@@ -37,6 +37,7 @@ SLOW_TASKS = frozenset(
         "tasks.post_tasks.execute_post",  # reel upload: ~6 min blocking
         "tasks.source_tasks.ingest_source",  # paginated IG listing
         "tasks.analytics_tasks.fetch_all_analytics",  # ~75s per post sweep
+        "tasks.analytics_tasks.fetch_fresh_analytics",  # hourly young-post lane
     }
 )
 
@@ -65,7 +66,20 @@ celery.conf.beat_schedule = {
     "beat-heartbeat": {"task": "tasks.health_tasks.beat_heartbeat", "schedule": crontab(minute="*")},
     # Turns critical-component state changes into dashboard notifications.
     "system-watchdog": {"task": "tasks.health_tasks.system_watchdog", "schedule": crontab(minute="*/2")},
-    "fetch-analytics": {"task": "tasks.analytics_tasks.fetch_all_analytics", "schedule": crontab(hour="*/4")},
+    # NOTE: crontab() defaults minute to "*", so an hour-only crontab
+    # fires EVERY MINUTE of those hours (this exact bug ran the sweep
+    # 60x per 4h window on 2026-10-03). Always pin the minute.
+    "fetch-analytics": {
+        "task": "tasks.analytics_tasks.fetch_all_analytics",
+        "schedule": crontab(minute=0, hour="*/4"),
+    },
+    # Hourly fast lane for young reels: re-check posts <24h old so the
+    # panel tracks fast-moving view counts within ~1h instead of ~4h.
+    # minute=12 keeps it clear of the :00 sweep and other hourly tasks.
+    "fetch-fresh-analytics": {
+        "task": "tasks.analytics_tasks.fetch_fresh_analytics",
+        "schedule": crontab(minute=12),
+    },
     "proxy-health-check": {"task": "tasks.proxy_tasks.check_all_proxies", "schedule": crontab(minute="*/30")},
     "proxy-pool-refresh": {"task": "tasks.proxy_tasks.refresh_proxy_pool", "schedule": crontab(hour="*/3", minute=17)},
     "media-cleanup": {"task": "tasks.cleanup_tasks.clean_old_media", "schedule": crontab(hour=4, minute=0)},
