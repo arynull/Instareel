@@ -101,3 +101,51 @@ def test_refresh_allowed_when_redis_down(client, monkeypatch):
     r = c.post("/api/v1/analytics/refresh")
     assert r.status_code == 200, r.text
     assert len(fake_celery.sent) == 1
+
+
+# ------------------------------------------------- per-post refresh -------
+
+
+def test_post_refresh_queues_single_task(client):
+    c, fake_celery = client
+    r = c.post("/api/v1/analytics/posts/5/refresh")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"status": "queued"}
+    assert fake_celery.sent == [
+        ("tasks.analytics_tasks.fetch_post_analytics", {"post_id": 5})
+    ]
+
+
+def test_second_post_refresh_while_running_gets_429(client):
+    c, fake_celery = client
+    assert c.post("/api/v1/analytics/posts/5/refresh").status_code == 200
+    r = c.post("/api/v1/analytics/posts/5/refresh")
+    assert r.status_code == 429
+    # No second task was dispatched.
+    assert len(fake_celery.sent) == 1
+
+
+def test_post_refresh_lock_is_per_post(client):
+    """The lock is per post id — refreshing post 6 while post 5 is locked
+    is allowed."""
+    c, fake_celery = client
+    assert c.post("/api/v1/analytics/posts/5/refresh").status_code == 200
+    r = c.post("/api/v1/analytics/posts/6/refresh")
+    assert r.status_code == 200, r.text
+    assert fake_celery.sent == [
+        ("tasks.analytics_tasks.fetch_post_analytics", {"post_id": 5}),
+        ("tasks.analytics_tasks.fetch_post_analytics", {"post_id": 6}),
+    ]
+
+
+def test_post_refresh_allowed_when_redis_down(client, monkeypatch):
+    c, fake_celery = client
+    import redis.asyncio as aioredis_module
+
+    def _boom(*a, **k):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(aioredis_module, "from_url", _boom)
+    r = c.post("/api/v1/analytics/posts/5/refresh")
+    assert r.status_code == 200, r.text
+    assert len(fake_celery.sent) == 1

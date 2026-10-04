@@ -227,6 +227,44 @@ async def refresh_analytics(_: str = Depends(get_current_admin)):
     return {"status": "queued"}
 
 
+#: Per-post manual refresh: one in-flight refresh per post. Short TTL — a
+#: single post takes seconds (one paced IG lookup), not minutes.
+ANALYTICS_POST_REFRESH_LOCK_TTL_S = 5 * 60
+
+
+@analytics_router.post("/posts/{post_id}/refresh")
+async def refresh_post_analytics(post_id: int, _: str = Depends(get_current_admin)):
+    """Queue an immediate analytics refresh for one post (slow lane).
+
+    Explicit per-post action — bypasses the per-post minimum interval like
+    the full manual refresh does. Per-post Redis lock so double-clicks get
+    a 429 instead of stacking duplicate IG lookups.
+    """
+    client = None
+    try:
+        client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        if not await client.set(
+            f"analytics:post_refresh_lock:{post_id}", "1",
+            nx=True, ex=ANALYTICS_POST_REFRESH_LOCK_TTL_S,
+        ):
+            raise HTTPException(
+                status_code=429,
+                detail="A refresh for this post is already queued or running.",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        # Redis down: still allow the trigger; the task itself is idempotent.
+        pass
+    finally:
+        if client is not None:
+            await client.aclose()
+    from app.tasks.celery_app import celery
+
+    celery.send_task("tasks.analytics_tasks.fetch_post_analytics", kwargs={"post_id": post_id})
+    return {"status": "queued"}
+
+
 @analytics_router.get("/posts")
 async def posts_breakdown(limit: int = Query(default=100, ge=1, le=2000), _: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(Post).where(Post.status == PostStatus.posted).order_by(desc(Post.posted_at)).limit(limit))).scalars().all()

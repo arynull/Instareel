@@ -38,6 +38,7 @@ SLOW_TASKS = frozenset(
         "tasks.source_tasks.ingest_source",  # paginated IG listing
         "tasks.analytics_tasks.fetch_all_analytics",  # ~75s per post sweep
         "tasks.analytics_tasks.fetch_fresh_analytics",  # hourly young-post lane
+        "tasks.analytics_tasks.fetch_post_analytics",  # per-post manual refresh
     }
 )
 

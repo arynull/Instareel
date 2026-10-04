@@ -88,6 +88,7 @@ def test_slow_tasks_routed_to_slow_queue():
         "tasks.source_tasks.ingest_source",
         "tasks.analytics_tasks.fetch_all_analytics",
         "tasks.analytics_tasks.fetch_fresh_analytics",
+        "tasks.analytics_tasks.fetch_post_analytics",
     }
     for name in celery_app_module.SLOW_TASKS:
         assert routes[name] == {"queue": "slow"}, name

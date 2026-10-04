@@ -150,6 +150,35 @@ def fetch_fresh_analytics():
         return {"error": "failed"}
 
 
+@celery.task(name="tasks.analytics_tasks.fetch_post_analytics")
+def fetch_post_analytics(post_id: int):
+    """Refresh analytics for a single post (dashboard per-post button).
+
+    Explicit user action: bypasses the per-post minimum interval, but keeps
+    the shared per-post logic (pacing, pending guard) via _refresh_one_post.
+    """
+    from app.database import SyncSessionLocal
+    from app.models import Post, PostStatus
+    from app.tasks.sync_helpers import log_event_sync, publish_sync
+
+    try:
+        now = dt.datetime.now(dt.timezone.utc)
+        with SyncSessionLocal() as s:
+            p = s.get(Post, post_id)
+            if not p or p.status != PostStatus.posted:
+                return {"error": "not_found"}
+            item = (p.id, p.account_id, p.ig_media_id, p.posted_at)
+        outcome = _refresh_one_post(*item, now)
+        updated = 1 if outcome == "updated" else 0
+        pending = 1 if outcome == "pending" else 0
+        log_event_sync("INFO", "system", f"Post {post_id} analytics refresh: {outcome}")
+        publish_sync("analytics_update", {"updated": updated, "pending": pending})
+        return {"updated": updated, "pending": pending}
+    except Exception as exc:  # noqa: BLE001
+        _notify_analytics_failure(exc)
+        return {"error": "failed"}
+
+
 def _run_analytics_sweep(items, now):
     """Refresh one batch of posts; returns (updated, pending) counts."""
     updated = 0

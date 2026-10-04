@@ -12,6 +12,7 @@ export default function PostsPage() {
   const { data: queue } = useQueue();
   const retry = useApiMutation("post", [["posts"]]);
   const remove = useApiMutation("delete", [["posts"]], "Post deleted");
+  const refreshPost = useApiMutation("post", [["posts"]], "Refresh queued — fresh numbers land in a minute or so");
   const [busyId, setBusyId] = useState<number | null>(null);
   const posts = (data ?? []) as Post[];
 
@@ -82,6 +83,7 @@ export default function PostsPage() {
                     <td className="py-2 pr-4">{p.ig_permalink ? <a className="text-emerald-500 hover:underline" href={p.ig_permalink} target="_blank">Reel ↗</a> : "—"}</td>
                     <td className="whitespace-nowrap py-2 text-right">
                       {p.status === "failed" && <button className="btn-ghost mr-2 !px-3 !py-1 text-xs" disabled={busyId === p.id} onClick={async () => { setBusyId(p.id); try { await retry.mutateAsync({ url: `/posts/${p.id}/retry` }); } finally { setBusyId(null); } }}>{busyId === p.id ? "Retrying…" : "Retry"}</button>}
+                      {p.status === "posted" && <button className="btn-ghost mr-2 !px-3 !py-1 text-xs" disabled={busyId === p.id} title="Refresh this post's views now" onClick={async () => { setBusyId(p.id); try { await refreshPost.mutateAsync({ url: `/analytics/posts/${p.id}/refresh` }); } finally { setBusyId(null); } }}>{busyId === p.id ? "Refreshing…" : "Refresh"}</button>}
                       <button className="btn-ghost !px-3 !py-1 text-xs text-red-500" disabled={busyId === p.id} onClick={async () => { if (!confirm(`Delete post #${p.id}?`)) return; setBusyId(p.id); try { await remove.mutateAsync({ url: `/posts/${p.id}` }); } finally { setBusyId(null); } }}>{busyId === p.id ? "Deleting…" : "Delete"}</button>
                     </td>
                   </tr>

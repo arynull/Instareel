@@ -79,6 +79,7 @@ TASK_LABELS = {
     "tasks.video_tasks.process_video": "processing a video",
     "tasks.analytics_tasks.fetch_all_analytics": "fetching analytics",
     "tasks.analytics_tasks.fetch_fresh_analytics": "fetching fresh analytics",
+    "tasks.analytics_tasks.fetch_post_analytics": "refreshing post analytics",
     "tasks.proxy_tasks.check_all_proxies": "checking proxies",
     "tasks.proxy_tasks.refresh_proxy_pool": "refreshing the proxy pool",
     "tasks.cleanup_tasks.clean_old_media": "cleaning up old media",
