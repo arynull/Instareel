@@ -1,14 +1,18 @@
-"""All-zero analytics on a young post is "not indexed yet", not data.
+"""All-zero analytics is API noise, never data — until proven otherwise.
 
 Verified 2026-10-02 on the live server: IG's private API served 0/0/0
 for a reel at 25h old (the app already showed views) and real numbers by
-36h. The sweep used to store that zero as final and stamp
-last_analytics_check, freezing a zero in the panel for hours.
+36h. Verified 2026-10-05: 0/0/0 for 48h+ on reels with real app views
+(posts 19/20) — so there is no safe age cutoff after which zeros become
+"genuine". View counts don't legitimately decay to zero either.
 
-Now an all-zero result on a post younger than ZERO_PENDING_HOURS (48h)
-leaves the row untouched (no overwrite, no check stamp) and counts as
-pending, so the post stays first in line for the next sweep. Past the
-window, all-zero is written as genuine data so the sweep keeps moving.
+So an all-zero read is left alone (no overwrite, no last_analytics_check
+stamp) whenever the post never converged (views_7d IS NULL) or the stored
+data is nonzero — the post stays first in line for the next sweep instead
+of freezing a zero in the panel. A zero is only written when the stored
+value is already zero (a genuinely dead reel keeps moving through the
+sweep). Past NO_DATA_NOTIFY_HOURS with no data, one warning notification
+points the admin at the likely cause (stored media id vs live reel).
 
 Each test gets a fresh temp-file SQLite DB; SyncSessionLocal is patched
 so the task hits the same DB. Network is fully mocked (media_info
@@ -26,7 +30,7 @@ import app.database as database
 from app.config import settings
 from app.database import Base
 from app.models import (
-    Account, Post, PostStatus, SystemLog, Video, VideoStatus,
+    Account, Notification, Post, PostStatus, SystemLog, Video, VideoStatus,
 )
 from app.services.instagram_service import InstagramService
 from app.tasks import periodic_tasks
@@ -117,10 +121,39 @@ def test_pending_post_retried_first_next_sweep(factory, fast_sweep):
     assert p.last_analytics_check is not None
 
 
-def test_all_zero_old_post_written_as_data(factory, fast_sweep):
-    """Past the 48h window an all-zero result is genuine data (dead reel):
-    written and stamped so the sweep keeps moving."""
+def test_all_zero_never_converged_stays_pending_past_old_window(factory, fast_sweep):
+    """No safe age cutoff exists (2026-10-05: 0/0/0 for 48h+ on reels with
+    real app views) — a never-converged post stays pending indefinitely,
+    never freezing a zero."""
+    pid = _seed(factory, posted_hours_ago=100)
+    fast_sweep({"like_count": 0, "comment_count": 0, "view_count": 0})
+
+    out = periodic_tasks.fetch_all_analytics.apply(kwargs={"force_refresh": True}).get()
+
+    assert out == {"updated": 0, "pending": 1}
+    p = _post(factory, pid)
+    assert p.views_7d is None
+    assert p.last_analytics_check is None
+
+
+def test_all_zero_with_previous_data_never_overwrites(factory, fast_sweep):
+    """Views don't decay to zero: an all-zero read against stored nonzero
+    data is API noise — kept, not overwritten, no stamp."""
     pid = _seed(factory, posted_hours_ago=72, views_7d=10)
+    fast_sweep({"like_count": 0, "comment_count": 0, "view_count": 0})
+
+    out = periodic_tasks.fetch_all_analytics.apply(kwargs={"force_refresh": True}).get()
+
+    assert out == {"updated": 0, "pending": 1}
+    p = _post(factory, pid)
+    assert p.views_7d == 10
+    assert p.last_analytics_check is None
+
+
+def test_genuine_zero_still_written(factory, fast_sweep):
+    """A post already at zero (genuinely dead reel) keeps moving through
+    the sweep: zero written, stamped, not stuck pending forever."""
+    pid = _seed(factory, posted_hours_ago=100, views_7d=0)
     fast_sweep({"like_count": 0, "comment_count": 0, "view_count": 0})
 
     out = periodic_tasks.fetch_all_analytics.apply(kwargs={"force_refresh": True}).get()
@@ -154,3 +187,35 @@ def test_views_zero_but_likes_nonzero_is_data(factory, fast_sweep):
 
     assert out == {"updated": 1, "pending": 0}
     assert _post(factory, pid).views_7d == 0
+
+
+def _notifications(factory):
+    with factory() as s:
+        return s.execute(select(Notification)).scalars().all()
+
+
+def test_no_data_notification_fires_after_six_days(factory, fast_sweep):
+    """A post with no IG data for 6 days raises one warning notification
+    (deduped) pointing at the likely cause — instead of silently showing
+    "—" forever."""
+    pid = _seed(factory, posted_hours_ago=6 * 24 + 0.5)
+    fast_sweep({"like_count": 0, "comment_count": 0, "view_count": 0})
+
+    out = periodic_tasks.fetch_all_analytics.apply(kwargs={"force_refresh": True}).get()
+
+    assert out == {"updated": 0, "pending": 1}
+    notes = _notifications(factory)
+    assert len(notes) == 1
+    assert notes[0].dedup_key == f"analytics_no_data:{pid}"
+    assert "6 days" in notes[0].message
+
+
+def test_no_data_notification_not_fired_early(factory, fast_sweep):
+    """Before the 6-day threshold: pending, but no notification yet."""
+    _seed(factory, posted_hours_ago=5 * 24)
+    fast_sweep({"like_count": 0, "comment_count": 0, "view_count": 0})
+
+    out = periodic_tasks.fetch_all_analytics.apply(kwargs={"force_refresh": True}).get()
+
+    assert out == {"updated": 0, "pending": 1}
+    assert _notifications(factory) == []

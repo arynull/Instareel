@@ -23,14 +23,17 @@ ANALYTICS_MIN_INTERVAL_HOURS = 3
 FRESH_ANALYTICS_MAX_AGE_HOURS = 24
 FRESH_ANALYTICS_MIN_INTERVAL_HOURS = 1
 MAX_FRESH_ANALYTICS_PER_RUN = 10
-# An all-zero media_info result on a young post is "not indexed yet", not
-# data. Verified 2026-10-02: IG's private API served 0/0/0 for a reel at
-# 25h old (the app already showed views) and real numbers by 36h. Posts
-# under this age with all-zero counters are left alone (no overwrite, no
-# last_analytics_check stamp) so they stay first in line on the next
-# sweep instead of freezing a zero in the panel. Past this age an
-# all-zero result is written as genuine data so the sweep keeps moving.
-ZERO_PENDING_HOURS = 48
+# An all-zero media_info result is NEVER written over real data, and never
+# frozen onto a post IG hasn't served data for yet. Verified 2026-10-05:
+# IG's private API served 0/0/0 for 48h+ on reels that showed real views in
+# the app (posts 19/20) — the old 48h "then it's genuine data" cutoff would
+# have frozen those lies into the panel. View counts don't legitimately
+# decay to zero, so an all-zero read against previous nonzero data is API
+# noise, not signal; and a post that never converged keeps its honest "—"
+# until IG serves numbers. Notify once if a post goes this long with no
+# data so the admin can check whether the stored media id still matches
+# the live reel.
+NO_DATA_NOTIFY_HOURS = 6 * 24
 
 
 def _post_age_hours(posted_at: "dt.datetime | None", now: "dt.datetime") -> float:
@@ -206,37 +209,68 @@ def _refresh_one_post(pid, acc_id, media_id, posted_at, now):
         comments = info.get("comment_count", 0)
         views = info.get("view_count", 0)
         age_h = _post_age_hours(posted_at, now)
-        if views == 0 and likes == 0 and comments == 0 and age_h < ZERO_PENDING_HOURS:
-            # IG hasn't indexed this media yet (or serves zeros for
-            # another reason): keep previous values and do NOT stamp
-            # last_analytics_check, so the post stays first in line
-            # for the next sweep instead of freezing a zero in the
-            # panel. The Checked column stays "—" — honest signal
-            # that no real data has landed yet.
-            log.info(
-                "analytics: post %s (ig %s) pending — IG serving zeros at %.1fh old",
-                pid, media_id, age_h,
-            )
-            return "pending"
-        eng = round((likes + comments) / max(1, views) * 100, 2) if views else 0.0
         with SyncSessionLocal() as s:
             p = s.get(Post, pid)
-            if p:
-                if age_h <= 30:
-                    p.views_24h, p.likes_24h, p.comments_7d = views, likes, comments
-                p.views_7d, p.likes_7d, p.comments_7d = views, likes, comments
-                p.engagement_rate = eng
-                p.last_analytics_check = dt.datetime.now(dt.timezone.utc)
-                s.commit()
+            if not p:
+                return "skipped"
+            if views == 0 and likes == 0 and comments == 0 and (
+                p.views_7d is None or p.views_7d > 0
+            ):
+                # All-zero read, but either IG never served data for this
+                # post or the stored data is nonzero — views don't decay to
+                # zero, so both smell like API noise. Keep previous values
+                # and do NOT stamp last_analytics_check, so the post stays
+                # first in line for the next sweep instead of freezing a
+                # zero in the panel. The Checked column stays "—" — honest
+                # signal that no real data has landed yet.
+                if NO_DATA_NOTIFY_HOURS <= age_h < NO_DATA_NOTIFY_HOURS + 6:
+                    _notify_no_analytics_data(pid)
                 log.info(
-                    "analytics: post %s (ig %s) -> views=%s likes=%s comments=%s",
-                    pid, media_id, views, likes, comments,
+                    "analytics: post %s (ig %s) pending — IG serving zeros at %.1fh old "
+                    "(raw ig_play=%s play=%s view=%s)",
+                    pid, media_id, age_h,
+                    info.get("raw_ig_play_count"), info.get("raw_play_count"),
+                    info.get("raw_view_count"),
                 )
-                return "updated"
+                return "pending"
+            eng = round((likes + comments) / max(1, views) * 100, 2) if views else 0.0
+            if age_h <= 30:
+                p.views_24h, p.likes_24h, p.comments_7d = views, likes, comments
+            p.views_7d, p.likes_7d, p.comments_7d = views, likes, comments
+            p.engagement_rate = eng
+            p.last_analytics_check = dt.datetime.now(dt.timezone.utc)
+            s.commit()
+            log.info(
+                "analytics: post %s (ig %s) -> views=%s likes=%s comments=%s",
+                pid, media_id, views, likes, comments,
+            )
+            return "updated"
         return "skipped"
     except Exception:
         log.exception("analytics fetch failed for post %s", pid)
         return "failed"
+
+
+def _notify_no_analytics_data(pid):
+    """One warning when a post goes a week with zero analytics data from IG.
+
+    Fires inside a bounded window after the threshold so it can't spam: the
+    4h sweep lands in the window at most twice, and notify_sync dedups while
+    unread. Points the admin at the likely cause — a stored media id that no
+    longer matches the live reel.
+    """
+    from app.tasks.sync_helpers import notify_sync
+
+    notify_sync(
+        "analytics_no_data",
+        "warning",
+        f"Post {pid} has no analytics data",
+        f"Instagram has served no view/like data for post {pid} for 6 days "
+        f"(all-zero reads). If the reel shows views in the app, the stored "
+        f"media id may not match the live reel — check its link.",
+        link="/dashboard/posts",
+        dedup_key=f"analytics_no_data:{pid}",
+    )
 
 
 def _notify_analytics_failure(exc):

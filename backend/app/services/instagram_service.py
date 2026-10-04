@@ -402,6 +402,12 @@ class InstagramService:
                 "like_count": info.get("like_count", 0),
                 "comment_count": info.get("comment_count", 0),
                 "view_count": views,
+                # Raw counter shapes for forensics: when the sweep logs a
+                # "pending" (all-zero) read, these show which field the API
+                # actually zeroed vs dropped.
+                "raw_ig_play_count": raw_ig_play,
+                "raw_play_count": raw_play,
+                "raw_view_count": raw_view,
             }
         except Exception as exc:
             log.warning("media_info failed for %s: %s", media_id, exc)
